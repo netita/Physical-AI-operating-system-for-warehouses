@@ -1,0 +1,220 @@
+# ============================================================
+# WarehouseGPT Base Image
+# NVIDIA PyTorch 24.12 + all production dependencies
+# ============================================================
+# Build:
+#   docker build -f Dockerfile.base -t warehousegpt/base:24.12 .
+# Push:
+#   docker push registry.io/warehousegpt/base:24.12
+# ============================================================
+
+ARG PYTORCH_VERSION=24.12
+FROM nvcr.io/nvidia/pytorch:${PYTORCH_VERSION}-py3
+
+LABEL org.opencontainers.image.title="WarehouseGPT Base" \
+      org.opencontainers.image.description="Base image for WarehouseGPT Physical AI OS — NVIDIA PyTorch + all deps" \
+      org.opencontainers.image.vendor="WarehouseGPT" \
+      org.opencontainers.image.version="1.0.0" \
+      org.opencontainers.image.licenses="Proprietary"
+
+# ---- System packages ----
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    # Build tools
+    build-essential \
+    cmake \
+    ninja-build \
+    pkg-config \
+    git \
+    git-lfs \
+    # Image & video processing
+    libopencv-dev \
+    libavcodec-dev \
+    libavformat-dev \
+    libswscale-dev \
+    libgstreamer1.0-dev \
+    libgstreamer-plugins-base1.0-dev \
+    # Networking & utilities
+    curl \
+    wget \
+    netcat-openbsd \
+    dnsutils \
+    iputils-ping \
+    net-tools \
+    ca-certificates \
+    gnupg \
+    lsb-release \
+    # PostgreSQL client (for health checks and migrations)
+    postgresql-client-16 \
+    # Redis CLI
+    redis-tools \
+    # Process management
+    supervisor \
+    tini \
+    # Security
+    openssl \
+    libssl-dev \
+    # NUMA awareness for GPU affinity
+    numactl \
+    libnuma-dev \
+    # Locale
+    locales \
+    && locale-gen en_US.UTF-8 \
+    && rm -rf /var/lib/apt/lists/*
+
+ENV LANG=en_US.UTF-8 \
+    LANGUAGE=en_US:en \
+    LC_ALL=en_US.UTF-8
+
+# ---- Python version pin ----
+# NVIDIA pytorch:24.12-py3 ships Python 3.10
+ARG PYTHON_VERSION=3.10
+ENV PYTHON_VERSION=${PYTHON_VERSION}
+
+# ---- Upgrade pip, setuptools, wheel ----
+RUN pip install --no-cache-dir --upgrade \
+    pip==24.2 \
+    setuptools==70.3.0 \
+    wheel==0.44.0
+
+# ---- NVIDIA inference libraries ----
+# TensorRT is already in the NGC base image; install Python bindings
+RUN pip install --no-cache-dir \
+    tensorrt==10.1.0 \
+    --extra-index-url https://pypi.nvidia.com
+
+# Triton client
+RUN pip install --no-cache-dir \
+    tritonclient[all]==2.47.0 \
+    polygraphy==0.49.10
+
+# ONNX stack
+RUN pip install --no-cache-dir \
+    onnx==1.16.1 \
+    onnxruntime-gpu==1.18.1 \
+    onnxsim==0.4.36
+
+# ---- Core ML libraries (versions pinned for reproducibility) ----
+RUN pip install --no-cache-dir \
+    numpy==1.26.4 \
+    scipy==1.13.1 \
+    scikit-learn==1.5.1 \
+    pandas==2.2.2 \
+    matplotlib==3.9.1 \
+    Pillow==10.4.0 \
+    opencv-python-headless==4.10.0.84 \
+    einops==0.8.0 \
+    timm==1.0.7
+
+# ---- Transformers & training (already have torch from base) ----
+RUN pip install --no-cache-dir \
+    accelerate==0.31.0 \
+    transformers==4.42.3 \
+    diffusers==0.29.2 \
+    datasets==2.20.0 \
+    tokenizers==0.19.1 \
+    safetensors==0.4.3 \
+    peft==0.11.1 \
+    bitsandbytes==0.43.1
+
+# Flash Attention (requires Ampere+ GPU and CUDA 11.8+)
+RUN pip install --no-cache-dir \
+    flash-attn==2.5.9 \
+    --no-build-isolation \
+    || echo "WARNING: flash-attn build failed — skipping (non-critical for CPU-only builds)"
+
+# ---- API / runtime dependencies ----
+RUN pip install --no-cache-dir \
+    fastapi==0.111.0 \
+    uvicorn[standard]==0.30.1 \
+    uvloop==0.19.0 \
+    httptools==0.6.1 \
+    httpx==0.27.0 \
+    pydantic==2.7.0 \
+    pydantic-settings==2.3.0 \
+    python-multipart==0.0.9 \
+    starlette==0.37.2 \
+    orjson==3.10.5
+
+# ---- Anthropic SDK ----
+RUN pip install --no-cache-dir \
+    anthropic==0.28.0
+
+# ---- LangChain / LangGraph ----
+RUN pip install --no-cache-dir \
+    langchain==0.2.5 \
+    langchain-anthropic==0.1.15 \
+    langchain-community==0.2.5 \
+    langchain-core==0.2.10 \
+    langgraph==0.1.5
+
+# ---- Databases ----
+RUN pip install --no-cache-dir \
+    asyncpg==0.29.0 \
+    "sqlalchemy[asyncio]==2.0.30" \
+    alembic==1.13.1 \
+    psycopg2-binary==2.9.9 \
+    "redis[hiredis]==5.0.7" \
+    "celery[redis]==5.4.0" \
+    neo4j==5.21.0 \
+    chromadb==0.5.3
+
+# ---- Observability ----
+RUN pip install --no-cache-dir \
+    prometheus-client==0.20.0 \
+    opentelemetry-api==1.25.0 \
+    opentelemetry-sdk==1.25.0 \
+    opentelemetry-exporter-otlp-proto-grpc==1.25.0 \
+    opentelemetry-instrumentation-fastapi==0.46b0 \
+    opentelemetry-instrumentation-httpx==0.46b0 \
+    opentelemetry-instrumentation-redis==0.46b0 \
+    opentelemetry-instrumentation-sqlalchemy==0.46b0
+
+# ---- Kubernetes client ----
+RUN pip install --no-cache-dir \
+    kubernetes==30.1.0
+
+# ---- Utilities ----
+RUN pip install --no-cache-dir \
+    python-dotenv==1.0.1 \
+    click==8.1.7 \
+    rich==13.7.1 \
+    tenacity==8.4.1 \
+    structlog==24.2.0 \
+    pyzmq==26.0.3 \
+    msgpack==1.0.8
+
+# ---- YOLOv8 ----
+RUN pip install --no-cache-dir \
+    ultralytics==8.2.60
+
+# ---- Security scanning (runtime CVE checks) ----
+RUN pip install --no-cache-dir \
+    pip-audit==2.7.3
+
+# ---- Non-root user for production workloads ----
+ARG APP_USER=warehousegpt
+ARG APP_UID=1001
+ARG APP_GID=1001
+RUN groupadd -g ${APP_GID} ${APP_USER} && \
+    useradd -u ${APP_UID} -g ${APP_GID} -m -s /bin/bash ${APP_USER}
+
+# ---- App directories ----
+RUN mkdir -p /app /var/log/warehousegpt /tmp/trt_cache && \
+    chown -R ${APP_USER}:${APP_USER} /app /var/log/warehousegpt /tmp/trt_cache
+
+WORKDIR /app
+
+# ---- NVIDIA runtime env ----
+ENV NVIDIA_VISIBLE_DEVICES=all \
+    NVIDIA_DRIVER_CAPABILITIES=compute,utility \
+    CUDA_MODULE_LOADING=LAZY
+
+# ---- Python env ----
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    PYTHONHASHSEED=random \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1
+
+# Use tini as PID 1 for proper signal handling
+ENTRYPOINT ["/usr/bin/tini", "--"]

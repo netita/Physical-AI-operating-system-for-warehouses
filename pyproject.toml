@@ -1,0 +1,378 @@
+[build-system]
+requires = ["hatchling>=1.24"]
+build-backend = "hatchling.build"
+
+# ---------------------------------------------------------------------------
+# Project metadata
+# ---------------------------------------------------------------------------
+[project]
+name = "warehousegpt"
+version = "0.1.0"
+description = "Physical AI Operating System for Warehouses — multi-modal robot orchestration with Claude-powered NL interface"
+readme = "README.md"
+license = { text = "Proprietary" }
+requires-python = ">=3.10,<3.12"
+authors = [
+    { name = "WarehouseGPT Team" },
+]
+keywords = ["robotics", "warehouse", "ai", "ros2", "autonomous", "physical-ai"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+]
+
+# ---------------------------------------------------------------------------
+# Core runtime dependencies (always installed)
+# ---------------------------------------------------------------------------
+dependencies = [
+    # ---- Async HTTP / API runtime ----
+    "fastapi>=0.111.0",
+    "uvicorn[standard]>=0.30.1",
+    "httpx>=0.27.0",
+    "pydantic>=2.7.0",
+    "pydantic-settings>=2.3.0",
+    "python-multipart>=0.0.9",
+    "starlette>=0.37.2",
+
+    # ---- Anthropic (Claude Sonnet 4.6 — WarehouseGPT agent) ----
+    "anthropic>=0.28.0",
+
+    # ---- LangChain orchestration ----
+    "langchain>=0.2.5",
+    "langchain-anthropic>=0.1.15",
+    "langchain-community>=0.2.5",
+    "langchain-core>=0.2.10",
+    "langgraph>=0.1.5",
+
+    # ---- Vector store: ChromaDB ----
+    "chromadb>=0.5.3",
+
+    # ---- Graph database: Neo4j ----
+    "neo4j>=5.21.0",
+
+    # ---- Relational DB ----
+    "asyncpg>=0.29.0",
+    "sqlalchemy[asyncio]>=2.0.30",
+    "alembic>=1.13.1",
+    "psycopg2-binary>=2.9.9",
+
+    # ---- Task queue / cache: Redis ----
+    "redis[hiredis]>=5.0.7",
+    "celery[redis]>=5.4.0",
+
+    # ---- Observability ----
+    "prometheus-client>=0.20.0",
+    "opentelemetry-api>=1.25.0",
+    "opentelemetry-sdk>=1.25.0",
+    "opentelemetry-exporter-otlp-proto-grpc>=1.25.0",
+    "opentelemetry-instrumentation-fastapi>=0.46b0",
+    "opentelemetry-instrumentation-httpx>=0.46b0",
+    "opentelemetry-instrumentation-redis>=0.46b0",
+    "opentelemetry-instrumentation-sqlalchemy>=0.46b0",
+
+    # ---- Kubernetes client ----
+    "kubernetes>=30.1.0",
+
+    # ---- Computer vision utilities ----
+    "numpy>=1.26.4,<2.0",
+    "opencv-python-headless>=4.10.0.84",
+    "pillow>=10.4.0",
+    "einops>=0.8.0",
+    "timm>=1.0.7",
+
+    # ---- Configuration & utilities ----
+    "python-dotenv>=1.0.1",
+    "click>=8.1.7",
+    "rich>=13.7.1",
+    "tenacity>=8.4.1",
+    "structlog>=24.2.0",
+    "pyzmq>=26.0.3",
+    "msgpack>=1.0.8",
+    "orjson>=3.10.5",
+]
+
+# ---------------------------------------------------------------------------
+# Optional dependency groups
+# ---------------------------------------------------------------------------
+[project.optional-dependencies]
+
+# Phase 1 — Simulation & synthetic data
+simulation = [
+    # Isaac Sim / Omniverse are installed via NVIDIA Omniverse launcher or
+    # the isaac-sim pip wheel (available from NVIDIA's private PyPI index).
+    # Pinned here as version constraints; install from:
+    #   pip install isaacsim-rl isaacsim-replicator --extra-index-url \
+    #       https://pypi.nvidia.com
+    "isaacsim-rl>=4.1.0",
+    "isaacsim-replicator>=4.1.0",
+    "omni-kit-commands>=1.0.0",
+    "omni-replicator-core>=1.10.0",
+    "warp-lang>=1.1.0",            # NVIDIA Warp: GPU-accelerated simulation
+]
+
+# Phase 2 — Deep learning training & fine-tuning
+training = [
+    "torch>=2.3.1",
+    "torchvision>=0.18.1",
+    "torchaudio>=2.3.1",
+    "accelerate>=0.31.0",
+    "transformers>=4.42.3",
+    "diffusers>=0.29.2",
+    "datasets>=2.20.0",
+    "tokenizers>=0.19.1",
+    "safetensors>=0.4.3",
+    "evaluate>=0.4.2",
+    "peft>=0.11.1",
+    "bitsandbytes>=0.43.1",
+    "flash-attn>=2.5.9",           # requires CUDA 11.8+ and Ampere+
+    "deepspeed>=0.14.3",
+    "wandb>=0.17.3",
+]
+
+# Phase 3 — Optimized inference (TensorRT + Triton)
+inference = [
+    # TensorRT wheel is installed from NVIDIA PyPI:
+    #   pip install tensorrt --extra-index-url https://pypi.nvidia.com
+    "tensorrt>=10.1.0",
+    "tensorrt-lean>=10.1.0",
+    "tensorrt-dispatch>=10.1.0",
+    "cuda-python>=12.4.0",
+    "tritonclient[all]>=2.47.0",   # http, grpc, and utils
+    "polygraphy>=0.49.10",         # TRT engine inspection/validation
+    "onnx>=1.16.1",
+    "onnxruntime-gpu>=1.18.1",
+    "onnxsim>=0.4.36",
+]
+
+# Phase 4 — ROS 2 bridge (installed into ROS 2 Humble environment)
+# These packages are typically installed via apt or colcon, not pip.
+# Listed here for documentation and for environments that support
+# pip-installable ROS 2 wheels.
+ros2 = [
+    "rclpy>=3.3.15",
+    "geometry-msgs>=4.2.4",
+    "sensor-msgs>=4.2.4",
+    "nav-msgs>=4.2.4",
+    "action-msgs>=2.3.3",
+    "builtin-interfaces>=2.3.3",
+    "rcl-interfaces>=2.3.3",
+    "std-msgs>=4.2.4",
+    "tf2-ros-py>=0.25.7",
+    "cv-bridge>=3.3.1",
+    "image-transport>=3.1.6",
+]
+
+# Full install: all optional groups combined (excluding ROS 2)
+all = [
+    "warehousegpt[simulation]",
+    "warehousegpt[training]",
+    "warehousegpt[inference]",
+]
+
+# ---------------------------------------------------------------------------
+# Console scripts / entry points
+# ---------------------------------------------------------------------------
+[project.scripts]
+warehousegpt-api      = "warehousegpt.apps.api_gateway.main:main"
+warehousegpt-agent    = "warehousegpt.apps.agent.main:main"
+warehousegpt-fleet    = "warehousegpt.apps.fleet_manager.main:main"
+warehousegpt-scheduler= "warehousegpt.apps.mission_scheduler.main:main"
+warehousegpt-dtsync   = "warehousegpt.apps.digital_twin_sync.main:main"
+
+# ---------------------------------------------------------------------------
+# Hatch environments
+# ---------------------------------------------------------------------------
+[tool.hatch.envs.default]
+features = []   # base runtime only
+
+[tool.hatch.envs.default.scripts]
+lint   = "ruff check . && mypy ."
+fmt    = "ruff format ."
+
+[tool.hatch.envs.api]
+features = []
+[tool.hatch.envs.api.scripts]
+serve = "uvicorn warehousegpt.apps.api_gateway.main:app --host 0.0.0.0 --port 8000 --reload"
+
+[tool.hatch.envs.agent]
+features = []
+[tool.hatch.envs.agent.scripts]
+serve = "python -m warehousegpt.apps.agent.main"
+
+[tool.hatch.envs.train]
+features = ["training"]
+[tool.hatch.envs.train.scripts]
+run = "python -m warehousegpt.packages.training.train {args}"
+
+[tool.hatch.envs.infer]
+features = ["inference"]
+[tool.hatch.envs.infer.scripts]
+build-engines = "python scripts/build_trt_engines.py {args}"
+
+[tool.hatch.envs.sim]
+features = ["simulation"]
+[tool.hatch.envs.sim.scripts]
+gen-data = "python scripts/synthetic_data_gen.py {args}"
+
+# Lightweight env for unit tests — no torch/flash-attn/tensorrt required.
+# test_world_model.py skips gracefully via pytest.importorskip("torch").
+[tool.hatch.envs.test]
+features = []
+dependencies = [
+    "pytest>=8.2.2",
+    "pytest-asyncio>=0.23.7",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "httpx>=0.27.0",
+    "factory-boy>=3.3.0",
+    "faker>=25.8.0",
+    "respx>=0.21.1",
+]
+[tool.hatch.envs.test.scripts]
+unit        = "pytest tests/ -v --cov=warehousegpt --cov-report=term-missing {args}"
+integration = "pytest tests/integration -v --asyncio-mode=auto {args}"
+simulation  = "pytest tests/simulation -v --asyncio-mode=auto {args}"
+all         = "pytest tests/ -v --asyncio-mode=auto --cov=warehousegpt --cov-report=xml {args}"
+
+# Full env with GPU deps (torch must be installed first via pip before flash-attn builds).
+[tool.hatch.envs.test-gpu]
+features = ["inference", "training"]
+dependencies = [
+    "pytest>=8.2.2",
+    "pytest-asyncio>=0.23.7",
+    "pytest-cov>=5.0.0",
+    "pytest-mock>=3.14.0",
+    "httpx>=0.27.0",
+    "factory-boy>=3.3.0",
+    "faker>=25.8.0",
+    "respx>=0.21.1",
+]
+[tool.hatch.envs.test-gpu.scripts]
+unit        = "pytest tests/ -v --cov=warehousegpt --cov-report=term-missing {args}"
+integration = "pytest tests/integration -v --asyncio-mode=auto {args}"
+simulation  = "pytest tests/simulation -v --asyncio-mode=auto {args}"
+all         = "pytest tests/ -v --asyncio-mode=auto --cov=warehousegpt --cov-report=xml {args}"
+
+# ---------------------------------------------------------------------------
+# Hatch build configuration
+# ---------------------------------------------------------------------------
+[tool.hatch.build.targets.wheel]
+packages = ["warehousegpt"]
+
+[tool.hatch.build.targets.sdist]
+exclude = [
+    "/.github",
+    "/docker",
+    "/infra",
+    "/models",
+    "/tests",
+    "*.egg-info",
+]
+
+# ---------------------------------------------------------------------------
+# Ruff linter / formatter
+# ---------------------------------------------------------------------------
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+src = ["warehousegpt", "tests", "scripts"]
+
+[tool.ruff.lint]
+select = [
+    "E", "W",   # pycodestyle
+    "F",        # pyflakes
+    "I",        # isort
+    "N",        # pep8-naming
+    "UP",       # pyupgrade
+    "ANN",      # flake8-annotations
+    "ASYNC",    # flake8-async
+    "S",        # flake8-bandit (security)
+    "B",        # flake8-bugbear
+    "A",        # flake8-builtins
+    "C4",       # flake8-comprehensions
+    "DTZ",      # flake8-datetimez
+    "EM",       # flake8-errmsg
+    "G",        # flake8-logging-format
+    "PIE",      # flake8-pie
+    "PT",       # flake8-pytest-style
+    "RSE",      # flake8-raise
+    "RET",      # flake8-return
+    "SIM",      # flake8-simplify
+    "TCH",      # flake8-type-checking
+    "ARG",      # flake8-unused-arguments
+    "PL",       # pylint
+    "RUF",      # ruff-specific
+]
+ignore = [
+    "ANN101",   # missing type annotation for self
+    "ANN102",   # missing type annotation for cls
+    "S101",     # use of assert (needed in tests)
+    "PLR0913",  # too many arguments
+]
+
+[tool.ruff.lint.isort]
+known-first-party = ["warehousegpt"]
+force-sort-within-sections = true
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["ANN", "S", "ARG"]
+"scripts/**" = ["ANN"]
+
+# ---------------------------------------------------------------------------
+# Mypy type checking
+# ---------------------------------------------------------------------------
+[tool.mypy]
+python_version = "3.10"
+strict = true
+ignore_missing_imports = true
+exclude = [
+    "tests/",
+    "scripts/",
+    "infra/",
+]
+
+# ---------------------------------------------------------------------------
+# Pytest configuration
+# ---------------------------------------------------------------------------
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+asyncio_mode = "auto"
+log_cli = true
+log_cli_level = "INFO"
+log_format = "%(asctime)s %(levelname)s %(name)s: %(message)s"
+addopts = [
+    "--strict-markers",
+    "--tb=short",
+    "-ra",
+]
+markers = [
+    "unit: pure unit tests (no external services)",
+    "integration: requires running Docker Compose stack",
+    "simulation: requires NVIDIA Isaac Sim",
+    "gpu: requires CUDA GPU",
+    "slow: long-running tests",
+]
+
+# ---------------------------------------------------------------------------
+# Coverage
+# ---------------------------------------------------------------------------
+[tool.coverage.run]
+source = ["warehousegpt"]
+omit = [
+    "*/tests/*",
+    "*/migrations/*",
+    "*/__init__.py",
+]
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if TYPE_CHECKING:",
+    "raise NotImplementedError",
+    "if __name__ == .__main__.:",
+]

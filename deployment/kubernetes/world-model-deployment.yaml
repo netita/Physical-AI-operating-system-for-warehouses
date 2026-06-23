@@ -1,0 +1,252 @@
+# ============================================================
+# World Model Inference Service — Deployment & Service
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: world-model
+  namespace: warehousegpt
+  labels:
+    app: world-model
+    app.kubernetes.io/name: world-model
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/part-of: physical-ai-os
+  annotations:
+    description: "Warehouse world model — spatio-temporal transformer for occupancy prediction and collision risk"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: world-model
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: world-model
+        app.kubernetes.io/name: world-model
+        app.kubernetes.io/component: inference
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9090"
+        prometheus.io/path: "/metrics"
+    spec:
+      nodeSelector:
+        accelerator: nvidia-a100
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - world-model
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-workload
+
+      initContainers:
+        - name: wait-for-triton
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Waiting for Triton Inference Server..."
+              until wget -qO- http://triton-inference-server:8000/v2/health/ready; do
+                echo "Triton not ready — retrying in 5s"
+                sleep 5
+              done
+              echo "Triton is ready."
+
+      containers:
+        - name: world-model
+          image: warehousegpt/world-model:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "warehousegpt.world_model.server"]
+
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+            - name: grpc
+              containerPort: 50051
+              protocol: TCP
+            - name: metrics
+              containerPort: 9090
+              protocol: TCP
+
+          env:
+            - name: TRITON_GRPC_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: warehousegpt-config
+                  key: triton_grpc_endpoint
+            - name: WORLD_MODEL_NAME
+              value: "world_model"
+            - name: PREDICTION_HORIZON_SECONDS
+              value: "30"
+            - name: MAX_BATCH_SIZE
+              value: "32"
+            - name: INFERENCE_DEVICE
+              value: "cuda"
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: redis_url
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_dsn
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_uri
+            - name: POD_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: POD_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "1"
+
+          volumeMounts:
+            - name: shared-memory
+              mountPath: /dev/shm
+            - name: tmp-dir
+              mountPath: /tmp
+
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 45
+            periodSeconds: 20
+            timeoutSeconds: 10
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8080
+            initialDelaySeconds: 20
+            periodSeconds: 10
+            failureThreshold: 30
+
+      volumes:
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 4Gi
+        - name: tmp-dir
+          emptyDir: {}
+
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: world-model
+  namespace: warehousegpt
+  labels:
+    app: world-model
+    app.kubernetes.io/component: inference
+spec:
+  selector:
+    app: world-model
+  ports:
+    - name: http
+      port: 8080
+      targetPort: 8080
+    - name: grpc
+      port: 50051
+      targetPort: 50051
+    - name: metrics
+      port: 9090
+      targetPort: 9090
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: world-model-hpa
+  namespace: warehousegpt
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: world-model
+  minReplicas: 2
+  maxReplicas: 6
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 65
+    - type: Pods
+      pods:
+        metric:
+          name: world_model_inference_queue_depth
+        target:
+          type: AverageValue
+          averageValue: "10"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: world-model-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: world-model

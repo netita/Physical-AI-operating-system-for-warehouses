@@ -1,0 +1,324 @@
+# ============================================================
+# WarehouseGPT Agent API — Deployment, Service, HPA
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: warehousegpt-agent
+  namespace: warehousegpt
+  labels:
+    app: warehousegpt-agent
+    app.kubernetes.io/name: warehousegpt-agent
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: physical-ai-os
+  annotations:
+    description: "WarehouseGPT agent API — Claude-powered natural language warehouse orchestration"
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: warehousegpt-agent
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 2
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: warehousegpt-agent
+        app.kubernetes.io/name: warehousegpt-agent
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9092"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - warehousegpt-agent
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-workload
+
+      initContainers:
+        - name: wait-for-redis
+          image: redis:7.2-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until redis-cli -h redis ping | grep PONG; do
+                echo "Waiting for Redis..."
+                sleep 2
+              done
+              echo "Redis is ready."
+        - name: db-migrate
+          image: warehousegpt/agent:latest
+          command: ["python", "-m", "alembic", "upgrade", "head"]
+          env:
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_dsn
+
+      containers:
+        - name: agent-api
+          image: warehousegpt/agent:latest
+          imagePullPolicy: Always
+          command:
+            - uvicorn
+            - warehousegpt.apps.agent.main:app
+            - --host=0.0.0.0
+            - --port=8000
+            - --workers=4
+            - --loop=uvloop
+            - --http=httptools
+            - --access-log
+            - --log-level=info
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: metrics
+              containerPort: 9092
+              protocol: TCP
+
+          env:
+            # Anthropic Claude
+            - name: ANTHROPIC_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: anthropic_api_key
+            - name: ANTHROPIC_MODEL
+              value: "claude-sonnet-4-6"
+            - name: ANTHROPIC_MAX_TOKENS
+              value: "8192"
+
+            # Databases
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_dsn
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: redis_url
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_uri
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_user
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_password
+            - name: CHROMADB_HOST
+              value: "chromadb"
+            - name: CHROMADB_PORT
+              value: "8000"
+
+            # Internal service endpoints
+            - name: WORLD_MODEL_GRPC_ENDPOINT
+              value: "world-model:50051"
+            - name: DIGITAL_TWIN_GRPC_ENDPOINT
+              value: "digital-twin:50052"
+            - name: TRITON_GRPC_ENDPOINT
+              valueFrom:
+                configMapKeyRef:
+                  name: warehousegpt-config
+                  key: triton_grpc_endpoint
+
+            # Application config
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: ENVIRONMENT
+              value: "production"
+            - name: ENABLE_OTEL
+              value: "true"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "warehousegpt-agent"
+            - name: CORS_ORIGINS
+              value: "https://app.warehousegpt.io,https://dashboard.warehousegpt.io"
+            - name: JWT_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: jwt_secret
+            - name: RATE_LIMIT_REQUESTS_PER_MINUTE
+              value: "600"
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: 4Gi
+            limits:
+              cpu: "4"
+              memory: 8Gi
+
+          volumeMounts:
+            - name: tmp-dir
+              mountPath: /tmp
+
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 5
+            failureThreshold: 24
+
+      volumes:
+        - name: tmp-dir
+          emptyDir: {}
+
+      terminationGracePeriodSeconds: 45
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: warehousegpt-agent
+  namespace: warehousegpt
+  labels:
+    app: warehousegpt-agent
+    app.kubernetes.io/component: api
+spec:
+  selector:
+    app: warehousegpt-agent
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+    - name: metrics
+      port: 9092
+      targetPort: 9092
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: warehousegpt-agent-hpa
+  namespace: warehousegpt
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: warehousegpt-agent
+  minReplicas: 3
+  maxReplicas: 20
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 60
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Object
+      object:
+        metric:
+          name: nginx_ingress_controller_requests_per_second
+        describedObject:
+          apiVersion: networking.k8s.io/v1
+          kind: Ingress
+          name: warehousegpt-ingress
+        target:
+          type: Value
+          value: "100"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 15
+      policies:
+        - type: Pods
+          value: 3
+          periodSeconds: 30
+        - type: Percent
+          value: 50
+          periodSeconds: 30
+      selectPolicy: Max
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 60
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: warehousegpt-agent-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: warehousegpt-agent
+
+---
+# Shared ServiceAccount for standard workloads
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: warehousegpt-workload
+  namespace: warehousegpt
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/warehousegpt-workload-role
+
+---
+# Secrets placeholder — populate via External Secrets Operator or Vault
+apiVersion: v1
+kind: Secret
+metadata:
+  name: warehousegpt-secrets
+  namespace: warehousegpt
+  annotations:
+    description: "Populated by External Secrets Operator from AWS Secrets Manager"
+type: Opaque
+# data values injected by ExternalSecret controller — do not hardcode here

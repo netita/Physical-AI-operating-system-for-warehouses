@@ -1,0 +1,210 @@
+# ============================================================
+# WarehouseGPT — Default Warehouse Generation Configuration
+# Phase 1: Synthetic Data Platform (NVIDIA Isaac Sim)
+# ============================================================
+
+# -------------------------------------------------------
+# Warehouse footprint
+# -------------------------------------------------------
+warehouse:
+  floor_length: 120.0          # metres (X axis)
+  floor_width:  60.0           # metres (Y axis)
+  ceiling_height: 9.0          # metres (Z axis)
+  wall_thickness: 0.3          # metres
+
+# -------------------------------------------------------
+# Rack layout
+# -------------------------------------------------------
+layout:
+  type: double_aisle            # single_aisle | double_aisle | cross_dock
+  aisle_width: 3.5              # metres between rack faces
+  cross_aisle_width: 5.0        # cross-aisle for cross_dock layout
+  num_rack_rows: 8
+  num_rack_bays_per_row: 20
+
+# -------------------------------------------------------
+# Individual rack dimensions
+# -------------------------------------------------------
+rack:
+  width: 2.7                    # metres (standard pallet-rack bay)
+  depth: 1.1                    # metres
+  height: 5.5                   # metres
+  beam_levels: 4                # number of load-bearing beam pairs
+  uprights_per_bay: 3
+
+# -------------------------------------------------------
+# Loading dock
+# -------------------------------------------------------
+loading_dock:
+  num_doors: 4
+  door_width: 4.0               # metres
+  door_height: 4.5              # metres
+  dock_depth: 12.0              # metres of exterior apron
+
+# -------------------------------------------------------
+# Lighting (base — before domain randomisation)
+# -------------------------------------------------------
+lighting:
+  num_overhead_area_lights: 12
+  overhead_intensity: 5000.0    # nits
+  overhead_colour_kelvin: 4000  # colour temperature K
+  num_skylights: 4
+  skylight_intensity: 2000.0
+  enable_point_lights: true
+  point_light_count: 8
+  point_light_intensity: 3000.0
+  sun_elevation_deg: 45.0
+  sun_azimuth_deg: 135.0
+
+# -------------------------------------------------------
+# Asset library (Nucleus paths)
+# -------------------------------------------------------
+assets:
+  rack_usd:      "omniverse://localhost/NVIDIA/Assets/Warehouse/Racks/PalletRack_A.usd"
+  floor_mdl:     "omniverse://localhost/NVIDIA/Assets/Warehouse/Materials/ConcreteFloor_A.mdl"
+  wall_mdl:      "omniverse://localhost/NVIDIA/Assets/Warehouse/Materials/CinderBlock_A.mdl"
+  ceiling_mdl:   "omniverse://localhost/NVIDIA/Assets/Warehouse/Materials/Metal_Ceiling_A.mdl"
+
+  worker_usds:
+    - "omniverse://localhost/NVIDIA/Assets/Characters/Worker_Male_A/Worker_Male_A.usd"
+    - "omniverse://localhost/NVIDIA/Assets/Characters/Worker_Female_A/Worker_Female_A.usd"
+    - "omniverse://localhost/NVIDIA/Assets/Characters/Worker_Male_B/Worker_Male_B.usd"
+    - "omniverse://localhost/NVIDIA/Assets/Characters/Worker_Female_B/Worker_Female_B.usd"
+
+  forklift_usds:
+    counterbalance: "omniverse://localhost/NVIDIA/Assets/Warehouse/Equipment/Forklift_A.usd"
+    reach_truck:    "omniverse://localhost/NVIDIA/Assets/Warehouse/Equipment/Reach_Truck_A.usd"
+    pallet_jack:    "omniverse://localhost/NVIDIA/Assets/Warehouse/Equipment/PalletJack_A.usd"
+    order_picker:   "omniverse://localhost/NVIDIA/Assets/Warehouse/Equipment/OrderPicker_A.usd"
+
+# -------------------------------------------------------
+# Physics
+# -------------------------------------------------------
+physics:
+  enable: true
+  gravity: -9.81                # m/s²
+  physics_scene_path: /World/PhysicsScene
+
+# -------------------------------------------------------
+# Domain randomisation ranges
+# -------------------------------------------------------
+domain_randomisation:
+  lighting:
+    intensity_min: 1000.0
+    intensity_max: 8000.0
+    colour_temp_min_k: 2700     # warm incandescent
+    colour_temp_max_k: 6500     # cool daylight
+    shadow_softness_min: 0.0
+    shadow_softness_max: 10.0
+
+  time_of_day:
+    hour_min: 5.0               # early morning
+    hour_max: 21.0              # late evening
+
+  weather:
+    types: [clear, dusty, foggy, wet]
+    dust_particle_count_min: 500
+    dust_particle_count_max: 2000
+    fog_density_min: 0.01
+    fog_density_max: 0.08
+
+  workers:
+    min: 0
+    max: 20
+
+  forklifts:
+    min: 0
+    max: 10
+
+  inventory:
+    fill_ratio: 0.7             # fraction of rack beam levels that get boxes
+    box_size_range:             # half-extents [min, max] per axis (m)
+      x: [0.2, 0.6]
+      y: [0.2, 0.6]
+      z: [0.15, 0.5]
+
+# -------------------------------------------------------
+# Camera configuration
+# -------------------------------------------------------
+cameras:
+  overhead:
+    grid_spacing: 10.0          # metres between ceiling cameras
+    resolution: [2048, 2048]
+    mount_height_offset: 0.3   # metres below ceiling surface
+    focal_length_mm: 1.8       # ultra-wide fisheye
+    fov_deg: 185.0
+
+  rack_endcap:
+    resolution: [1920, 1080]
+    mount_height: 3.5           # metres
+    focal_length_mm: 2.8
+
+  forklift_ego:
+    resolution: [1280, 720]
+    mount_height_on_mast: 3.2  # metres
+    mount_forward_offset: 0.5
+    tilt_deg: -10.0
+    focal_length_mm: 4.0
+
+  depth_sensor:
+    resolution: [848, 480]
+    range_min: 0.15             # metres
+    range_max: 10.0
+    tilt_deg: -30.0
+    count: 4                   # number of dock-area depth sensors
+
+# -------------------------------------------------------
+# Episode / data collection
+# -------------------------------------------------------
+data_collection:
+  frames_per_episode: 200
+  dt: 0.033333                  # 30 Hz
+  save_rgb: true
+  save_depth: true
+  save_segmentation: true
+  save_bboxes: true
+  jpeg_quality: 90
+  image_width: 1920
+  image_height: 1080
+  output_root: /data/warehouse_synthetic
+
+# -------------------------------------------------------
+# Fire simulation
+# -------------------------------------------------------
+fire_simulation:
+  spread_rate_min: 0.02         # m/s
+  spread_rate_max: 0.08
+  max_radius: 15.0              # m — fire auto-tagged "contained" above this
+  initial_radius: 0.3           # m
+  smoke_rise_speed: 0.5         # m/s
+  semantic_label_fire: 10
+  semantic_label_smoke: 11
+
+# -------------------------------------------------------
+# Worker behaviour
+# -------------------------------------------------------
+worker_behaviour:
+  walk_speed: 1.2               # m/s
+  pick_cycle_duration: 3.5      # seconds
+  load_cycle_duration: 2.0      # seconds
+  tasks: [idle, walking, picking, loading]
+
+# -------------------------------------------------------
+# Forklift behaviour
+# -------------------------------------------------------
+forklift_behaviour:
+  max_speed: 2.5                # m/s
+  turn_rate: 0.8                # rad/s
+  fork_lift_speed: 0.1          # m/s vertical
+  fork_insert_speed: 0.3        # m/s horizontal
+  carry_height: 0.3             # m above ground
+  navmesh_cell_size: 0.5        # m grid resolution for A*
+
+# -------------------------------------------------------
+# Dataset export
+# -------------------------------------------------------
+export:
+  format: huggingface           # huggingface | json
+  push_to_hub: false
+  hub_repo_id: null             # e.g. your-org/warehouse-synth-v1
+  dataset_version: "1.0.0"

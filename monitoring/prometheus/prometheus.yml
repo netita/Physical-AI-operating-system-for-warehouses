@@ -1,0 +1,353 @@
+# ============================================================
+# Prometheus Configuration — WarehouseGPT Production
+# Scrapes all services, robots, cameras, and GPU metrics
+# ============================================================
+
+global:
+  scrape_interval: 15s
+  scrape_timeout: 10s
+  evaluation_interval: 15s
+  # External labels attached to all time series
+  external_labels:
+    cluster: warehousegpt-prod
+    region: us-east-1
+    environment: production
+    team: warehousegpt-engineering
+
+# ---- Alertmanager ----
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+      timeout: 10s
+      api_version: v2
+
+# ---- Rule files ----
+rule_files:
+  - /etc/prometheus/alerts/*.yml
+  - /etc/prometheus/rules/*.yml
+
+# ============================================================
+# Scrape Configurations
+# ============================================================
+scrape_configs:
+
+  # ---- Prometheus self-monitoring ----
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+    metrics_path: /metrics
+
+  # ---- WarehouseGPT Agent API ----
+  - job_name: warehousegpt_agent
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: warehousegpt-agent
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+        action: keep
+        regex: "true"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_port]
+        action: replace
+        target_label: __address__
+        regex: (.+)
+        replacement: "${__meta_kubernetes_pod_ip}:$1"
+      - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+        action: replace
+        target_label: __metrics_path__
+        regex: (.+)
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        target_label: service
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ---- World Model Inference Service ----
+  - job_name: world_model
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: world-model
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9090"
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # ---- Digital Twin Service ----
+  - job_name: digital_twin
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: digital-twin
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9091"
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # ---- Triton Inference Server (native Prometheus endpoint) ----
+  - job_name: triton_inference_server
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: triton-inference-server
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:8002"
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # ---- NVIDIA DCGM Exporter (GPU metrics per node) ----
+  - job_name: dcgm_exporter
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [monitoring]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: dcgm-exporter
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9400"
+      - source_labels: [__meta_kubernetes_node_name]
+        target_label: node
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ---- TimescaleDB (postgres_exporter) ----
+  - job_name: timescaledb
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: timescaledb
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9187"
+      - source_labels: [__meta_kubernetes_namespace]
+        target_label: namespace
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ---- Redis (redis_exporter) ----
+  - job_name: redis
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: redis
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9121"
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ---- Neo4j (native Prometheus endpoint) ----
+  - job_name: neo4j
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: neo4j
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:2004"
+      - source_labels: [__meta_kubernetes_pod_name]
+        target_label: pod
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ---- NGINX Ingress Controller ----
+  - job_name: nginx_ingress
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [ingress-nginx]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app_kubernetes_io_name]
+        action: keep
+        regex: ingress-nginx
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:10254"
+    metrics_path: /metrics
+    scrape_interval: 15s
+
+  # ---- Kubernetes cluster state (kube-state-metrics) ----
+  - job_name: kube_state_metrics
+    static_configs:
+      - targets: ["kube-state-metrics.kube-system.svc.cluster.local:8080"]
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ---- Node exporter (per-node hardware metrics) ----
+  - job_name: node_exporter
+    kubernetes_sd_configs:
+      - role: node
+    relabel_configs:
+      - action: labelmap
+        regex: __meta_kubernetes_node_label_(.+)
+      - target_label: __address__
+        replacement: "${__meta_kubernetes_node_name}:9100"
+      - source_labels: [__meta_kubernetes_node_name]
+        target_label: node
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ---- Forklift ROS2 bridge metrics ----
+  # Each forklift exposes a /metrics endpoint via the ROS2-Prometheus bridge
+  - job_name: forklift_fleet
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/sd/forklifts/*.json
+        refresh_interval: 60s
+    relabel_configs:
+      - source_labels: [__address__]
+        target_label: instance
+      - source_labels: [forklift_id]
+        target_label: forklift_id
+      - source_labels: [warehouse_id]
+        target_label: warehouse_id
+    metrics_path: /metrics
+    scrape_interval: 5s
+    scrape_timeout: 4s
+
+  # ---- IP camera stream analytics ----
+  - job_name: camera_analytics
+    file_sd_configs:
+      - files:
+          - /etc/prometheus/sd/cameras/*.json
+        refresh_interval: 60s
+    relabel_configs:
+      - source_labels: [camera_id]
+        target_label: camera_id
+      - source_labels: [location]
+        target_label: location
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # ---- Safety AI detector service ----
+  - job_name: safety_ai
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: safety-detector
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9093"
+    metrics_path: /metrics
+    scrape_interval: 10s
+
+  # ---- Celery task queue metrics (flower + celery-prometheus-exporter) ----
+  - job_name: celery
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: celery-exporter
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:9808"
+    metrics_path: /metrics
+    scrape_interval: 30s
+
+  # ---- ChromaDB ----
+  - job_name: chromadb
+    kubernetes_sd_configs:
+      - role: pod
+        namespaces:
+          names: [warehousegpt]
+    relabel_configs:
+      - source_labels: [__meta_kubernetes_pod_label_app]
+        action: keep
+        regex: chromadb
+      - source_labels: [__meta_kubernetes_pod_ip]
+        target_label: __address__
+        replacement: "${__meta_kubernetes_pod_ip}:8001"
+    metrics_path: /api/v1/heartbeat
+    scrape_interval: 60s
+
+# ============================================================
+# Remote Write (optional — long-term storage in Thanos/Cortex)
+# ============================================================
+remote_write:
+  - url: "http://thanos-receive:10908/api/v1/receive"
+    remote_timeout: 30s
+    write_relabel_configs:
+      # Only forward high-cardinality critical metrics
+      - source_labels: [__name__]
+        regex: "(world_model_.*|safety_.*|forklift_.*|dcgm_.*|warehousegpt_.*)"
+        action: keep
+    queue_config:
+      capacity: 10000
+      max_shards: 10
+      min_shards: 2
+      max_samples_per_send: 5000
+      batch_send_deadline: 5s
+      min_backoff: 30ms
+      max_backoff: 5s
+    tls_config:
+      insecure_skip_verify: false
+
+# ============================================================
+# Storage
+# ============================================================
+storage:
+  tsdb:
+    path: /prometheus
+    retention.time: 15d
+    retention.size: 100GB

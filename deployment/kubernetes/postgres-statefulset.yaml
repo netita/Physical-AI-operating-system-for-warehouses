@@ -1,0 +1,307 @@
+# ============================================================
+# TimescaleDB StatefulSet — PostgreSQL time-series extension
+# ============================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: timescaledb
+  namespace: warehousegpt
+  labels:
+    app: timescaledb
+    app.kubernetes.io/name: timescaledb
+    app.kubernetes.io/component: database
+    app.kubernetes.io/part-of: physical-ai-os
+  annotations:
+    description: "TimescaleDB — time-series PostgreSQL for sensor data and incident history"
+spec:
+  serviceName: timescaledb
+  replicas: 3
+  selector:
+    matchLabels:
+      app: timescaledb
+  updateStrategy:
+    type: RollingUpdate
+  podManagementPolicy: OrderedReady
+  template:
+    metadata:
+      labels:
+        app: timescaledb
+        app.kubernetes.io/name: timescaledb
+        app.kubernetes.io/component: database
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9187"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - timescaledb
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-workload
+      securityContext:
+        fsGroup: 70
+        runAsUser: 70
+        runAsGroup: 70
+
+      initContainers:
+        - name: init-permissions
+          image: busybox:1.36
+          command: ["sh", "-c", "chown -R 70:70 /var/lib/postgresql"]
+          securityContext:
+            runAsUser: 0
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+
+      containers:
+        - name: timescaledb
+          image: timescale/timescaledb-ha:pg16-ts2.14
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: postgres
+              containerPort: 5432
+              protocol: TCP
+
+          env:
+            - name: POSTGRES_DB
+              value: warehousegpt
+            - name: POSTGRES_USER
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_user
+            - name: POSTGRES_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_password
+            - name: PGDATA
+              value: /var/lib/postgresql/data/pgdata
+            # Replication
+            - name: PATRONI_KUBERNETES_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: PATRONI_KUBERNETES_LABELS
+              value: '{"app": "timescaledb"}'
+            - name: PATRONI_SCOPE
+              value: warehousegpt-postgres
+            - name: POD_IP
+              valueFrom:
+                fieldRef:
+                  fieldPath: status.podIP
+            # TimescaleDB tuning
+            - name: TIMESCALEDB_TELEMETRY
+              value: "off"
+
+          args:
+            - postgres
+            - -c
+            - max_connections=200
+            - -c
+            - shared_buffers=8GB
+            - -c
+            - effective_cache_size=24GB
+            - -c
+            - maintenance_work_mem=2GB
+            - -c
+            - checkpoint_completion_target=0.9
+            - -c
+            - wal_buffers=256MB
+            - -c
+            - default_statistics_target=500
+            - -c
+            - random_page_cost=1.1
+            - -c
+            - effective_io_concurrency=300
+            - -c
+            - min_wal_size=4GB
+            - -c
+            - max_wal_size=16GB
+            - -c
+            - max_worker_processes=16
+            - -c
+            - max_parallel_workers_per_gather=8
+            - -c
+            - max_parallel_workers=16
+            - -c
+            - max_parallel_maintenance_workers=4
+            - -c
+            - wal_level=replica
+            - -c
+            - hot_standby=on
+            - -c
+            - max_wal_senders=10
+            - -c
+            - max_replication_slots=10
+            - -c
+            - wal_log_hints=on
+            - -c
+            - log_min_duration_statement=500
+            - -c
+            - shared_preload_libraries=timescaledb,pg_stat_statements
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: 16Gi
+            limits:
+              cpu: "8"
+              memory: 32Gi
+
+          volumeMounts:
+            - name: data
+              mountPath: /var/lib/postgresql
+            - name: postgres-config
+              mountPath: /etc/postgresql/conf.d
+
+          livenessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - /bin/sh
+                - -c
+                - pg_isready -U $POSTGRES_USER -d $POSTGRES_DB
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+        # Sidecar: postgres_exporter for Prometheus
+        - name: postgres-exporter
+          image: prometheuscommunity/postgres-exporter:v0.15.0
+          ports:
+            - name: exporter
+              containerPort: 9187
+          env:
+            - name: DATA_SOURCE_NAME
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_exporter_dsn
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+
+      volumes:
+        - name: postgres-config
+          configMap:
+            name: timescaledb-config
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: timescaledb
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: gp3-encrypted
+        resources:
+          requests:
+            storage: 2Ti
+
+---
+# Headless service for StatefulSet DNS
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb
+  namespace: warehousegpt
+  labels:
+    app: timescaledb
+    app.kubernetes.io/component: database
+spec:
+  selector:
+    app: timescaledb
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  clusterIP: None  # Headless
+
+---
+# Read/write service (primary only)
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-primary
+  namespace: warehousegpt
+  labels:
+    app: timescaledb
+    role: primary
+spec:
+  selector:
+    app: timescaledb
+    role: primary
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+# Read-only service (replicas)
+apiVersion: v1
+kind: Service
+metadata:
+  name: timescaledb-replica
+  namespace: warehousegpt
+  labels:
+    app: timescaledb
+    role: replica
+spec:
+  selector:
+    app: timescaledb
+    role: replica
+  ports:
+    - name: postgres
+      port: 5432
+      targetPort: 5432
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: timescaledb-config
+  namespace: warehousegpt
+data:
+  timescaledb.conf: |
+    # TimescaleDB specific settings
+    timescaledb.max_background_workers = 16
+    timescaledb.telemetry_level = 'off'
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: timescaledb-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: timescaledb

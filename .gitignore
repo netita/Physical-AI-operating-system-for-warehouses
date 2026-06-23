@@ -1,0 +1,50 @@
+# Secrets — never commit
+.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Test artifacts
+.coverage
+htmlcov/
+.pytest_cache/
+_out_test/
+*.xml
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# Isaac Sim outputs
+_out_*/
+*.kit
+
+# Large data / model checkpoints
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.safetensors
+runs/
+wandb/
+
+# Docker
+*.log

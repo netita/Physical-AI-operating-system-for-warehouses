@@ -1,0 +1,213 @@
+# ============================================================
+# ChromaDB — Vector Store for Safety Embeddings & RAG
+# ============================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: chromadb
+  namespace: warehousegpt
+  labels:
+    app: chromadb
+    app.kubernetes.io/name: chromadb
+    app.kubernetes.io/component: vector-store
+    app.kubernetes.io/part-of: physical-ai-os
+  annotations:
+    description: "ChromaDB — vector store for safety incident embeddings, RAG over warehouse docs"
+spec:
+  serviceName: chromadb
+  replicas: 2
+  selector:
+    matchLabels:
+      app: chromadb
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: chromadb
+        app.kubernetes.io/name: chromadb
+        app.kubernetes.io/component: vector-store
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8001"
+        prometheus.io/path: "/api/v1/heartbeat"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - chromadb
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-workload
+      securityContext:
+        runAsUser: 1000
+        runAsGroup: 1000
+        fsGroup: 1000
+
+      containers:
+        - name: chromadb
+          image: chromadb/chroma:0.5.3
+          imagePullPolicy: IfNotPresent
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+
+          env:
+            - name: IS_PERSISTENT
+              value: "1"
+            - name: PERSIST_DIRECTORY
+              value: "/chroma/data"
+            - name: ANONYMIZED_TELEMETRY
+              value: "false"
+            - name: ALLOW_RESET
+              value: "false"
+            # Authentication
+            - name: CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER
+              value: "chromadb.auth.token.TokenConfigServerAuthCredentialsProvider"
+            - name: CHROMA_SERVER_AUTH_PROVIDER
+              value: "chromadb.auth.token.TokenAuthServerProvider"
+            - name: CHROMA_SERVER_AUTH_CREDENTIALS
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: chromadb_token
+            # Performance
+            - name: CHROMA_SERVER_AUTHN_CREDENTIALS_FILE
+              value: ""
+            - name: CHROMA_OTEL_EXPORTER_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: CHROMA_OTEL_SERVICE_NAME
+              value: "chromadb"
+            - name: CHROMA_OTEL_GRANULARITY
+              value: "operation"
+            # Log
+            - name: LOG_LEVEL
+              value: "INFO"
+
+          resources:
+            requests:
+              cpu: "2"
+              memory: 8Gi
+            limits:
+              cpu: "4"
+              memory: 16Gi
+
+          volumeMounts:
+            - name: data
+              mountPath: /chroma/data
+
+          livenessProbe:
+            httpGet:
+              path: /api/v1/heartbeat
+              port: 8000
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /api/v1/heartbeat
+              port: 8000
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          startupProbe:
+            httpGet:
+              path: /api/v1/heartbeat
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            failureThreshold: 20
+
+      terminationGracePeriodSeconds: 30
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: chromadb
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: gp3-encrypted
+        resources:
+          requests:
+            storage: 200Gi
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chromadb
+  namespace: warehousegpt
+  labels:
+    app: chromadb
+    app.kubernetes.io/component: vector-store
+spec:
+  selector:
+    app: chromadb
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 3600
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: chromadb-hpa
+  namespace: warehousegpt
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: StatefulSet
+    name: chromadb
+  minReplicas: 2
+  maxReplicas: 5
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: chromadb-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: chromadb

@@ -1,0 +1,442 @@
+# ============================================================
+# Prometheus Alert Rules — WarehouseGPT Production
+# Safety-critical and operational alerts
+# ============================================================
+
+groups:
+
+  # ============================================================
+  # SAFETY — Highest priority, immediate response required
+  # ============================================================
+  - name: warehousegpt_safety_critical
+    interval: 5s  # Evaluate every 5s for safety-critical alerts
+    rules:
+
+      # ---- High Collision Risk (world model prediction) ----
+      - alert: HighCollisionRisk
+        expr: |
+          max by (forklift_id, warehouse_id) (
+            world_model_risk_score{risk_type="collision"}
+          ) > 0.80
+        for: 0s  # Fire immediately — no window for collision risk
+        labels:
+          severity: critical
+          category: safety
+          team: operations
+          escalation: "immediate"
+          pagerduty_service: warehousegpt-safety
+        annotations:
+          summary: "CRITICAL: High collision risk predicted for forklift {{ $labels.forklift_id }}"
+          description: |
+            World model predicts {{ $value | humanizePercentage }} collision probability
+            for forklift {{ $labels.forklift_id }} in warehouse {{ $labels.warehouse_id }}
+            within the next 30 seconds.
+            Automated safety stop has been triggered.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/collision-risk-response"
+          dashboard: "https://grafana.warehousegpt.io/d/safety-overview"
+
+      # ---- Near-Miss Detection ----
+      - alert: NearMissDetected
+        expr: |
+          increase(safety_near_miss_total{severity!="low"}[1m]) > 0
+        for: 0s
+        labels:
+          severity: warning
+          category: safety
+          team: operations
+          pagerduty_service: warehousegpt-safety
+        annotations:
+          summary: "Near-miss event detected in warehouse {{ $labels.warehouse_id }}"
+          description: |
+            {{ $value }} near-miss event(s) detected in the last minute.
+            Camera: {{ $labels.camera_id }}, Zone: {{ $labels.zone_id }}.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/near-miss-response"
+
+      # ---- Worker in Danger Zone ----
+      - alert: WorkerInDangerZone
+        expr: |
+          safety_worker_in_danger_zone == 1
+        for: 0s
+        labels:
+          severity: critical
+          category: safety
+          team: operations
+          escalation: "immediate"
+          pagerduty_service: warehousegpt-safety
+        annotations:
+          summary: "CRITICAL: Worker detected in active forklift danger zone"
+          description: |
+            Worker detected within {{ $labels.proximity_m }}m of operating forklift
+            {{ $labels.forklift_id }} in zone {{ $labels.zone_id }},
+            warehouse {{ $labels.warehouse_id }}.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/worker-danger-zone"
+
+      # ---- Fire or Smoke Detected ----
+      - alert: FireOrSmokeDetected
+        expr: |
+          safety_detection_total{class=~"fire|smoke"} > 0
+        for: 0s
+        labels:
+          severity: critical
+          category: safety
+          team: emergency
+          escalation: "immediate"
+          pagerduty_service: warehousegpt-emergency
+        annotations:
+          summary: "EMERGENCY: Fire/smoke detected in warehouse {{ $labels.warehouse_id }}"
+          description: |
+            {{ $labels.class }} detected by camera {{ $labels.camera_id }}
+            in zone {{ $labels.zone_id }} with confidence {{ $value }}.
+            Emergency protocols initiated.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/fire-emergency"
+
+  # ============================================================
+  # ROBOT BEHAVIOR — Forklift anomalies
+  # ============================================================
+  - name: warehousegpt_forklift_behavior
+    interval: 10s
+    rules:
+
+      # ---- Forklift Anomalous Behavior (velocity spike) ----
+      - alert: ForkliftAnomalousBehavior
+        expr: |
+          abs(
+            deriv(forklift_velocity_ms[30s])
+          ) > 2.0
+          and
+          world_model_anomaly_score > 0.75
+        for: 5s
+        labels:
+          severity: warning
+          category: operations
+          team: fleet-management
+          pagerduty_service: warehousegpt-ops
+        annotations:
+          summary: "Anomalous behavior detected on forklift {{ $labels.forklift_id }}"
+          description: |
+            Forklift {{ $labels.forklift_id }} in warehouse {{ $labels.warehouse_id }}
+            shows anomalous velocity pattern.
+            Velocity: {{ $labels.velocity_ms }}m/s,
+            Anomaly score: {{ $value | humanizePercentage }}.
+            Possible causes: obstacle avoidance, mechanical fault, unauthorized use.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/forklift-anomaly"
+
+      # ---- Forklift Battery Critical ----
+      - alert: ForkliftBatteryCritical
+        expr: forklift_battery_percent < 10
+        for: 1m
+        labels:
+          severity: warning
+          category: operations
+          team: fleet-management
+        annotations:
+          summary: "Forklift {{ $labels.forklift_id }} battery critically low"
+          description: |
+            Battery at {{ $value }}% — forklift will shut down imminently.
+            Return to charging station immediately.
+
+      # ---- Forklift Offline ----
+      - alert: ForkliftOffline
+        expr: |
+          up{job="forklift_fleet"} == 0
+          or
+          time() - forklift_last_heartbeat_timestamp > 30
+        for: 30s
+        labels:
+          severity: warning
+          category: operations
+          team: fleet-management
+        annotations:
+          summary: "Forklift {{ $labels.forklift_id }} is offline"
+          description: |
+            No heartbeat from forklift {{ $labels.forklift_id }} for > 30 seconds.
+            Last known location: zone {{ $labels.last_zone }}.
+
+      # ---- Speed Limit Violation ----
+      - alert: ForkliftSpeedViolation
+        expr: |
+          forklift_velocity_ms > on(zone_id) group_left()
+          warehouse_zone_speed_limit_ms
+        for: 3s
+        labels:
+          severity: warning
+          category: compliance
+          team: operations
+        annotations:
+          summary: "Speed limit violation: forklift {{ $labels.forklift_id }}"
+          description: |
+            Forklift {{ $labels.forklift_id }} travelling at {{ $value }}m/s
+            in zone {{ $labels.zone_id }} (limit: {{ $labels.speed_limit }}m/s).
+
+  # ============================================================
+  # INFERENCE LATENCY — AI performance SLOs
+  # ============================================================
+  - name: warehousegpt_inference_latency
+    interval: 15s
+    rules:
+
+      # ---- Safety AI Latency High ----
+      - alert: SafetyAILatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            rate(nv_inference_request_duration_us_bucket{
+              model="safety_detector"
+            }[5m])
+          ) / 1000 > 100
+        for: 2m
+        labels:
+          severity: warning
+          category: performance
+          team: mlops
+          slo: safety-detector-p99-100ms
+        annotations:
+          summary: "Safety detector p99 latency exceeded 100ms SLO"
+          description: |
+            Safety detector p99 inference latency is {{ $value | humanize }}ms
+            (SLO: 100ms). This may delay safety interventions.
+            Check GPU utilization and Triton batch queue depth.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/high-inference-latency"
+
+      # ---- World Model Latency High ----
+      - alert: WorldModelLatencyHigh
+        expr: |
+          histogram_quantile(0.99,
+            rate(world_model_inference_duration_seconds_bucket[5m])
+          ) * 1000 > 500
+        for: 5m
+        labels:
+          severity: warning
+          category: performance
+          team: mlops
+          slo: world-model-p99-500ms
+        annotations:
+          summary: "World model p99 inference latency exceeded 500ms SLO"
+          description: |
+            World model p99 latency: {{ $value | humanize }}ms (SLO: 500ms).
+            Prediction quality may degrade.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/high-inference-latency"
+
+      # ---- Triton GPU Memory Near Full ----
+      - alert: TritonGPUMemoryHigh
+        expr: dcgm_fb_used_percent > 90
+        for: 5m
+        labels:
+          severity: warning
+          category: capacity
+          team: mlops
+        annotations:
+          summary: "GPU {{ $labels.gpu }} on node {{ $labels.node }} memory > 90%"
+          description: |
+            GPU memory at {{ $value }}% on {{ $labels.node }} GPU {{ $labels.gpu }}.
+            Triton may start rejecting inference requests.
+            Consider scaling up Triton deployment.
+
+      # ---- Triton Inference Queue Backup ----
+      - alert: TritonInferenceQueueBackup
+        expr: |
+          nv_inference_queue_duration_us > 10000
+        for: 1m
+        labels:
+          severity: warning
+          category: performance
+          team: mlops
+        annotations:
+          summary: "Triton inference queue backing up for model {{ $labels.model }}"
+          description: |
+            Average queue wait time {{ $value | humanize }}µs (>10ms).
+            Requests may time out. Scale Triton replicas or reduce batch timeout.
+
+  # ============================================================
+  # DIGITAL TWIN — Synchronisation lag
+  # ============================================================
+  - name: warehousegpt_digital_twin
+    interval: 10s
+    rules:
+
+      # ---- Digital Twin Lag ----
+      - alert: DigitalTwinLag
+        expr: |
+          digital_twin_sync_lag_ms > 500
+        for: 30s
+        labels:
+          severity: warning
+          category: quality
+          team: platform
+          slo: digital-twin-lag-500ms
+        annotations:
+          summary: "Digital twin lagging > 500ms behind real-time"
+          description: |
+            Digital twin for warehouse {{ $labels.warehouse_id }} is
+            {{ $value | humanize }}ms behind real-time (SLO: 500ms).
+            World model predictions may use stale state.
+          runbook: "https://github.com/<your-org>/warehousegpt/wiki/runbooks/digital-twin-lag"
+
+      # ---- Digital Twin Critical Lag ----
+      - alert: DigitalTwinCriticalLag
+        expr: |
+          digital_twin_sync_lag_ms > 2000
+        for: 10s
+        labels:
+          severity: critical
+          category: quality
+          team: platform
+          pagerduty_service: warehousegpt-platform
+        annotations:
+          summary: "CRITICAL: Digital twin lag > 2 seconds"
+          description: |
+            Digital twin for warehouse {{ $labels.warehouse_id }} is
+            {{ $value | humanize }}ms behind real-time.
+            Safety predictions are severely degraded. Manual oversight required.
+
+      # ---- Digital Twin Disconnected ----
+      - alert: DigitalTwinDisconnected
+        expr: |
+          up{job="digital_twin"} == 0
+          or
+          digital_twin_sensor_stream_active == 0
+        for: 15s
+        labels:
+          severity: critical
+          category: availability
+          team: platform
+          pagerduty_service: warehousegpt-platform
+        annotations:
+          summary: "Digital twin sensor feed disconnected for {{ $labels.warehouse_id }}"
+          description: |
+            No sensor data received for digital twin in warehouse {{ $labels.warehouse_id }}.
+            All AI safety predictions are now based on last known state only.
+
+  # ============================================================
+  # INFRASTRUCTURE — Availability and capacity
+  # ============================================================
+  - name: warehousegpt_infrastructure
+    interval: 30s
+    rules:
+
+      # ---- Service Down ----
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+          category: availability
+          team: platform
+          pagerduty_service: warehousegpt-platform
+        annotations:
+          summary: "Service {{ $labels.job }} is down"
+          description: |
+            Prometheus target {{ $labels.instance }} for job {{ $labels.job }}
+            has been unreachable for > 1 minute.
+
+      # ---- Pod CrashLooping ----
+      - alert: PodCrashLooping
+        expr: |
+          rate(kube_pod_container_status_restarts_total{
+            namespace="warehousegpt"
+          }[15m]) * 60 > 0.5
+        for: 5m
+        labels:
+          severity: warning
+          category: availability
+          team: platform
+        annotations:
+          summary: "Pod {{ $labels.pod }} is crash-looping"
+          description: |
+            Pod {{ $labels.pod }} in namespace {{ $labels.namespace }}
+            is restarting {{ $value | humanize }} times per minute.
+
+      # ---- Disk Space Low ----
+      - alert: DiskSpaceLow
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/data"} /
+          node_filesystem_size_bytes{mountpoint="/data"} < 0.15
+        for: 10m
+        labels:
+          severity: warning
+          category: capacity
+          team: platform
+        annotations:
+          summary: "Disk space below 15% on {{ $labels.instance }}"
+          description: |
+            Only {{ $value | humanizePercentage }} disk space remaining on
+            {{ $labels.instance }} mount {{ $labels.mountpoint }}.
+            Model storage, TimescaleDB, or Neo4j may fill disk.
+
+      # ---- Disk Space Critical ----
+      - alert: DiskSpaceCritical
+        expr: |
+          node_filesystem_avail_bytes{mountpoint="/data"} /
+          node_filesystem_size_bytes{mountpoint="/data"} < 0.05
+        for: 5m
+        labels:
+          severity: critical
+          category: capacity
+          team: platform
+          pagerduty_service: warehousegpt-platform
+        annotations:
+          summary: "CRITICAL: Disk space below 5% on {{ $labels.instance }}"
+
+      # ---- TimescaleDB Replication Lag ----
+      - alert: PostgresReplicationLag
+        expr: |
+          pg_replication_lag{job="timescaledb"} > 300
+        for: 5m
+        labels:
+          severity: warning
+          category: database
+          team: platform
+        annotations:
+          summary: "TimescaleDB replica lag > 5 minutes on {{ $labels.instance }}"
+          description: "Replication lag: {{ $value | humanizeDuration }}. Risk of data loss on failover."
+
+      # ---- Redis Memory High ----
+      - alert: RedisMemoryHigh
+        expr: |
+          redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 10m
+        labels:
+          severity: warning
+          category: database
+          team: platform
+        annotations:
+          summary: "Redis memory usage > 85% on {{ $labels.instance }}"
+          description: |
+            Redis using {{ $value | humanizePercentage }} of max memory.
+            Key evictions may occur, causing mission state loss.
+
+      # ---- Agent API Error Rate High ----
+      - alert: AgentAPIErrorRateHigh
+        expr: |
+          rate(http_requests_total{
+            job="warehousegpt_agent",
+            status=~"5.."
+          }[5m]) /
+          rate(http_requests_total{
+            job="warehousegpt_agent"
+          }[5m]) > 0.01
+        for: 5m
+        labels:
+          severity: warning
+          category: availability
+          team: platform
+          slo: agent-api-error-rate-1pct
+        annotations:
+          summary: "Agent API error rate > 1% SLO"
+          description: |
+            Error rate: {{ $value | humanizePercentage }} (SLO: 1%).
+            Check Claude API connectivity and database health.
+
+      # ---- Anthropic API Errors ----
+      - alert: AnthropicAPIErrors
+        expr: |
+          rate(anthropic_api_errors_total[5m]) > 0.1
+        for: 2m
+        labels:
+          severity: warning
+          category: external-dependency
+          team: platform
+        annotations:
+          summary: "Elevated Anthropic API error rate"
+          description: |
+            {{ $value | humanize }} Anthropic API errors/second.
+            Agent NL interface may be degraded. Check API key and rate limits.

@@ -1,0 +1,72 @@
+global:
+  smtp_smarthost: 'smtp.gmail.com:587'
+  smtp_from: '${ALERT_GMAIL_FROM}'
+  smtp_auth_username: '${ALERT_GMAIL_FROM}'
+  smtp_auth_password: '${ALERT_GMAIL_APP_PASSWORD}'
+  smtp_require_tls: true
+  resolve_timeout: 5m
+
+templates:
+  - /etc/alertmanager/templates/*.tmpl
+
+route:
+  receiver: warehouse-email
+  group_by: [alertname, severity]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+
+  routes:
+    # Critical alerts (fire, API down, critical incidents) — repeat every hour
+    - matchers:
+        - severity = critical
+      receiver: warehouse-email
+      repeat_interval: 1h
+      continue: false
+
+    # Warning alerts (high incident rate, no agents, slow latency) — default 4h repeat
+    - matchers:
+        - severity = warning
+      receiver: warehouse-email
+      continue: false
+
+receivers:
+  - name: warehouse-email
+    email_configs:
+      - to: '${ALERT_EMAIL_TO}'
+        send_resolved: true
+        require_tls: true
+        headers:
+          Subject: '[WarehouseGPT] {{ .Status | toUpper }}: {{ .GroupLabels.alertname }}'
+        html: |
+          <!DOCTYPE html>
+          <html>
+          <body style="font-family:Arial,sans-serif;background:#1a1a1a;color:#e0e0e0;padding:24px;">
+            <h2 style="color:{{ if eq .Status "firing" }}#E02F44{{ else }}#37872D{{ end }}">
+              WarehouseGPT — {{ .Status | toUpper }}
+            </h2>
+            {{ range .Alerts }}
+            <div style="border:1px solid #444;border-radius:6px;padding:16px;margin-bottom:16px;">
+              <p><b>Alert:</b> {{ .Labels.alertname }}</p>
+              <p><b>Severity:</b> {{ .Labels.severity }}</p>
+              <p><b>Summary:</b> {{ .Annotations.summary }}</p>
+              <p><b>Detail:</b> {{ .Annotations.description }}</p>
+              <p><b>Started:</b> {{ .StartsAt.Format "2006-01-02 15:04:05 UTC" }}</p>
+              {{ if .EndsAt }}<p><b>Resolved:</b> {{ .EndsAt.Format "2006-01-02 15:04:05 UTC" }}</p>{{ end }}
+            </div>
+            {{ end }}
+            <p style="color:#888;font-size:12px;">
+              Grafana dashboard: <a href="http://localhost:3001/d/warehousegpt-ops" style="color:#5794F2;">
+                WarehouseGPT Operations
+              </a>
+            </p>
+          </body>
+          </html>
+
+inhibit_rules:
+  # Suppress warnings when a critical alert on the same alertname is firing
+  - source_matchers:
+      - severity = critical
+    target_matchers:
+      - severity = warning
+    equal: [alertname]

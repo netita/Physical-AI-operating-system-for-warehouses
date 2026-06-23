@@ -1,0 +1,242 @@
+{
+  "title": "WarehouseGPT — Operations",
+  "uid": "warehousegpt-ops",
+  "schemaVersion": 38,
+  "version": 2,
+  "refresh": "10s",
+  "time": { "from": "now-1h", "to": "now" },
+  "timezone": "browser",
+  "tags": ["warehousegpt", "warehouse", "safety"],
+  "panels": [
+
+    {
+      "id": 1,
+      "title": "Active Forklifts",
+      "type": "stat",
+      "gridPos": { "x": 0, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "#1F60C4", "mode": "fixed" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "blue", "value": null }] },
+          "unit": "short"
+        }
+      },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "warehouse_agents_total{agent_type=\"forklift\"}",
+        "legendFormat": "Forklifts"
+      }]
+    },
+
+    {
+      "id": 2,
+      "title": "Active Workers",
+      "type": "stat",
+      "gridPos": { "x": 4, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "#37872D", "mode": "fixed" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "green", "value": null }] },
+          "unit": "short"
+        }
+      },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "warehouse_agents_total{agent_type=\"worker\"}",
+        "legendFormat": "Workers"
+      }]
+    },
+
+    {
+      "id": 3,
+      "title": "Active AMRs",
+      "type": "stat",
+      "gridPos": { "x": 8, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "color": { "fixedColor": "#FA6400", "mode": "fixed" },
+          "thresholds": { "mode": "absolute", "steps": [{ "color": "orange", "value": null }] },
+          "unit": "short"
+        }
+      },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "warehouse_agents_total{agent_type=\"amr\"}",
+        "legendFormat": "AMRs"
+      }]
+    },
+
+    {
+      "id": 4,
+      "title": "Incidents Last Hour",
+      "type": "stat",
+      "gridPos": { "x": 12, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "yellow", "value": 1 },
+              { "color": "red", "value": 5 }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0
+        }
+      },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "round(sum(increase(warehouse_incidents_total[1h])))",
+        "legendFormat": "Incidents"
+      }]
+    },
+
+    {
+      "id": 5,
+      "title": "Fires Detected (24 h)",
+      "type": "stat",
+      "gridPos": { "x": 16, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "background", "graphMode": "none", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "green", "value": null },
+              { "color": "red", "value": 1 }
+            ]
+          },
+          "unit": "short",
+          "decimals": 0,
+          "noValue": "0"
+        }
+      },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "round(sum(increase(warehouse_fires_detected_total[24h]))) or vector(0)",
+        "legendFormat": "Fires"
+      }]
+    },
+
+    {
+      "id": 6,
+      "title": "Inject Rate (frames/s)",
+      "type": "stat",
+      "gridPos": { "x": 20, "y": 0, "w": 4, "h": 4 },
+      "options": { "colorMode": "value", "graphMode": "area", "reduceOptions": { "calcs": ["lastNotNull"] } },
+      "fieldConfig": {
+        "defaults": {
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              { "color": "red", "value": null },
+              { "color": "yellow", "value": 5 },
+              { "color": "green", "value": 9 }
+            ]
+          },
+          "unit": "reqps"
+        }
+      },
+      "targets": [{
+        "datasource": "Prometheus",
+        "expr": "rate(warehouse_inject_requests_total[1m])",
+        "legendFormat": "fps"
+      }]
+    },
+
+    {
+      "id": 10,
+      "title": "Agent Count Over Time",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Forklifts" }, "properties": [{ "id": "color", "value": { "fixedColor": "#1F60C4", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Workers"   }, "properties": [{ "id": "color", "value": { "fixedColor": "#37872D", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "AMRs"      }, "properties": [{ "id": "color", "value": { "fixedColor": "#FA6400", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "warehouse_agents_total{agent_type=\"forklift\"}", "legendFormat": "Forklifts" },
+        { "datasource": "Prometheus", "expr": "warehouse_agents_total{agent_type=\"worker\"}",   "legendFormat": "Workers" },
+        { "datasource": "Prometheus", "expr": "warehouse_agents_total{agent_type=\"amr\"}",      "legendFormat": "AMRs" }
+      ]
+    },
+
+    {
+      "id": 11,
+      "title": "Incident Rate by Type (per minute)",
+      "type": "timeseries",
+      "gridPos": { "x": 12, "y": 4, "w": 12, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "sum(rate(warehouse_incidents_total{incident_type=\"near_miss\"}[1m]))*60",      "legendFormat": "Near Miss" },
+        { "datasource": "Prometheus", "expr": "sum(rate(warehouse_incidents_total{incident_type=\"collision\"}[1m]))*60",       "legendFormat": "Collision" },
+        { "datasource": "Prometheus", "expr": "sum(rate(warehouse_incidents_total{incident_type=\"zone_violation\"}[1m]))*60", "legendFormat": "Zone Violation" },
+        { "datasource": "Prometheus", "expr": "sum(rate(warehouse_incidents_total{incident_type=\"fire\"}[1m]))*60",           "legendFormat": "Fire" }
+      ]
+    },
+
+    {
+      "id": 12,
+      "title": "Incident Severity Breakdown",
+      "type": "piechart",
+      "gridPos": { "x": 0, "y": 12, "w": 8, "h": 8 },
+      "options": { "legendDisplayMode": "table", "placement": "right" },
+      "fieldConfig": {
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Critical" }, "properties": [{ "id": "color", "value": { "fixedColor": "#E02F44", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "High"     }, "properties": [{ "id": "color", "value": { "fixedColor": "#FA6400", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Medium"   }, "properties": [{ "id": "color", "value": { "fixedColor": "#FADE2A", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "sum(increase(warehouse_incidents_total{severity=\"critical\"}[1h]))", "legendFormat": "Critical" },
+        { "datasource": "Prometheus", "expr": "sum(increase(warehouse_incidents_total{severity=\"high\"}[1h]))",     "legendFormat": "High" },
+        { "datasource": "Prometheus", "expr": "sum(increase(warehouse_incidents_total{severity=\"medium\"}[1h]))",   "legendFormat": "Medium" }
+      ]
+    },
+
+    {
+      "id": 13,
+      "title": "/inject p50 / p95 / p99 Latency",
+      "type": "timeseries",
+      "gridPos": { "x": 8, "y": 12, "w": 16, "h": 8 },
+      "fieldConfig": {
+        "defaults": { "unit": "s", "custom": { "lineWidth": 2 } }
+      },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.50, sum(rate(warehouse_inject_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p50" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.95, sum(rate(warehouse_inject_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p95" },
+        { "datasource": "Prometheus", "expr": "histogram_quantile(0.99, sum(rate(warehouse_inject_latency_seconds_bucket[1m])) by (le))", "legendFormat": "p99" }
+      ]
+    },
+
+    {
+      "id": 14,
+      "title": "Camera Frames / Fire Events (per minute)",
+      "type": "timeseries",
+      "gridPos": { "x": 0, "y": 20, "w": 24, "h": 7 },
+      "fieldConfig": {
+        "defaults": { "unit": "short", "custom": { "lineWidth": 2 } },
+        "overrides": [
+          { "matcher": { "id": "byName", "options": "Fire events/min" }, "properties": [{ "id": "color", "value": { "fixedColor": "#E02F44", "mode": "fixed" } }] },
+          { "matcher": { "id": "byName", "options": "Camera frames/min" }, "properties": [{ "id": "color", "value": { "fixedColor": "#8AB8FF", "mode": "fixed" } }] }
+        ]
+      },
+      "targets": [
+        { "datasource": "Prometheus", "expr": "sum(rate(warehouse_camera_frames_total[1m]))*60 or vector(0)",       "legendFormat": "Camera frames/min" },
+        { "datasource": "Prometheus", "expr": "sum(rate(warehouse_fires_detected_total[1m]))*60 or vector(0)",      "legendFormat": "Fire events/min" }
+      ]
+    }
+
+  ]
+}

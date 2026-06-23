@@ -1,0 +1,273 @@
+# ============================================================
+# Digital Twin Service — Deployment, Service, HPA
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: digital-twin
+  namespace: warehousegpt
+  labels:
+    app: digital-twin
+    app.kubernetes.io/name: digital-twin
+    app.kubernetes.io/component: simulation
+    app.kubernetes.io/part-of: physical-ai-os
+  annotations:
+    description: "Real-time digital twin synchronisation — maintains sub-500ms lag from physical warehouse"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: digital-twin
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: digital-twin
+        app.kubernetes.io/name: digital-twin
+        app.kubernetes.io/component: simulation
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9091"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                    - key: app
+                      operator: In
+                      values:
+                        - digital-twin
+                topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-workload
+
+      initContainers:
+        - name: wait-for-postgres
+          image: postgres:16-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until pg_isready -h timescaledb -p 5432; do
+                echo "Waiting for TimescaleDB..."
+                sleep 3
+              done
+              echo "TimescaleDB is ready."
+        - name: wait-for-neo4j
+          image: busybox:1.36
+          command:
+            - /bin/sh
+            - -c
+            - |
+              until wget -qO- http://neo4j:7474/db/neo4j/cluster/available; do
+                echo "Waiting for Neo4j..."
+                sleep 5
+              done
+              echo "Neo4j is ready."
+
+      containers:
+        - name: digital-twin
+          image: warehousegpt/digital-twin:latest
+          imagePullPolicy: Always
+          command: ["python", "-m", "warehousegpt.digital_twin.server"]
+
+          ports:
+            - name: http
+              containerPort: 8081
+              protocol: TCP
+            - name: websocket
+              containerPort: 8082
+              protocol: TCP
+            - name: grpc
+              containerPort: 50052
+              protocol: TCP
+            - name: metrics
+              containerPort: 9091
+              protocol: TCP
+
+          env:
+            - name: POSTGRES_DSN
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: postgres_dsn
+            - name: NEO4J_URI
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_uri
+            - name: NEO4J_USER
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_user
+            - name: NEO4J_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: neo4j_password
+            - name: REDIS_URL
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: redis_url
+            - name: CHROMADB_HOST
+              value: "chromadb"
+            - name: CHROMADB_PORT
+              value: "8000"
+            # Twin synchronisation parameters
+            - name: SYNC_INTERVAL_MS
+              value: "100"
+            - name: MAX_LAG_MS
+              value: "500"
+            - name: SPATIAL_RESOLUTION_M
+              value: "0.1"
+            - name: WAREHOUSE_ID
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: LOG_LEVEL
+              value: "INFO"
+            - name: OTEL_EXPORTER_OTLP_ENDPOINT
+              value: "http://otel-collector:4317"
+            - name: OTEL_SERVICE_NAME
+              value: "digital-twin"
+
+          resources:
+            requests:
+              cpu: "4"
+              memory: 8Gi
+            limits:
+              cpu: "8"
+              memory: 16Gi
+
+          volumeMounts:
+            - name: twin-state
+              mountPath: /var/lib/digital-twin
+            - name: tmp-dir
+              mountPath: /tmp
+
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: 8081
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 10
+            timeoutSeconds: 5
+            failureThreshold: 5
+
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: 8081
+            initialDelaySeconds: 10
+            periodSeconds: 10
+            failureThreshold: 20
+
+      volumes:
+        - name: twin-state
+          emptyDir:
+            sizeLimit: 10Gi
+        - name: tmp-dir
+          emptyDir: {}
+
+      terminationGracePeriodSeconds: 30
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: digital-twin
+  namespace: warehousegpt
+  labels:
+    app: digital-twin
+    app.kubernetes.io/component: simulation
+spec:
+  selector:
+    app: digital-twin
+  ports:
+    - name: http
+      port: 8081
+      targetPort: 8081
+    - name: websocket
+      port: 8082
+      targetPort: 8082
+    - name: grpc
+      port: 50052
+      targetPort: 50052
+    - name: metrics
+      port: 9091
+      targetPort: 9091
+  type: ClusterIP
+
+---
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: digital-twin-hpa
+  namespace: warehousegpt
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: digital-twin
+  minReplicas: 2
+  maxReplicas: 10
+  metrics:
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+    - type: Resource
+      resource:
+        name: memory
+        target:
+          type: Utilization
+          averageUtilization: 75
+    - type: Pods
+      pods:
+        metric:
+          name: digital_twin_sync_lag_ms
+        target:
+          type: AverageValue
+          averageValue: "200"
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 30
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 600
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: digital-twin-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: digital-twin

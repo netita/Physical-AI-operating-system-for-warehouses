@@ -1,0 +1,244 @@
+# ============================================================
+# Triton Model Configuration — WarehouseGPT World Model
+# Spatio-temporal transformer for occupancy prediction &
+# collision risk estimation
+# ============================================================
+
+name: "world_model"
+backend: "pytorch"
+max_batch_size: 32
+
+# ----------------------------------------------------------
+# Input tensors
+# ----------------------------------------------------------
+input [
+  {
+    # Tokenized video features from VQ-VAE encoder
+    # Shape: [batch, sequence_length, embed_dim]
+    # sequence_length: T=16 frames * S=196 spatial patches = 3136
+    # embed_dim: 512
+    name: "video_tokens"
+    data_type: TYPE_FP16
+    dims: [ 3136, 512 ]
+  },
+  {
+    # Robot/forklift state history
+    # Shape: [batch, num_agents, state_dim]
+    # num_agents: max 64 forklifts, state_dim: 12 (x,y,z,vx,vy,vz,ax,ay,az,yaw,pitch,roll)
+    name: "agent_states"
+    data_type: TYPE_FP32
+    dims: [ 64, 12 ]
+  },
+  {
+    # Sparse occupancy map (BEV)
+    # Shape: [batch, height, width, channels]
+    # 200x200 grid at 0.1m resolution = 20m x 20m field of view
+    name: "occupancy_map"
+    data_type: TYPE_FP32
+    dims: [ 200, 200, 4 ]
+  },
+  {
+    # Attention mask for variable-length sequences
+    name: "attention_mask"
+    data_type: TYPE_BOOL
+    dims: [ 3136 ]
+  }
+]
+
+# ----------------------------------------------------------
+# Output tensors
+# ----------------------------------------------------------
+output [
+  {
+    # Predicted future video tokens (next N frames)
+    # Shape: [batch, future_seq_len, embed_dim]
+    # future_seq_len: 16 frames (4 seconds at 4Hz)
+    name: "future_tokens"
+    data_type: TYPE_FP16
+    dims: [ 3136, 512 ]
+  },
+  {
+    # Per-agent collision risk scores over prediction horizon
+    # Shape: [batch, num_agents, time_steps]
+    # time_steps: 30 (one per second for 30-second horizon)
+    name: "risk_scores"
+    data_type: TYPE_FP32
+    dims: [ 64, 30 ]
+  },
+  {
+    # Predicted occupancy probabilities (BEV)
+    # Shape: [batch, future_steps, height, width]
+    # future_steps: 10 (3-second prediction)
+    name: "occupancy"
+    data_type: TYPE_FP32
+    dims: [ 10, 200, 200 ]
+  },
+  {
+    # Trajectory predictions per agent (x, y, heading)
+    # Shape: [batch, num_agents, time_steps, 3]
+    name: "trajectory_predictions"
+    data_type: TYPE_FP32
+    dims: [ 64, 30, 3 ]
+  },
+  {
+    # Anomaly scores per agent (velocity spike, sudden stop, etc.)
+    # Shape: [batch, num_agents]
+    name: "anomaly_scores"
+    data_type: TYPE_FP32
+    dims: [ 64 ]
+  }
+]
+
+# ----------------------------------------------------------
+# Dynamic batching — aggregate requests for GPU efficiency
+# ----------------------------------------------------------
+dynamic_batching {
+  # Preferred batch sizes (powers of 2 for GPU alignment)
+  preferred_batch_size: [ 1, 4, 8, 16, 32 ]
+
+  # Maximum time (microseconds) to wait to fill a batch
+  # 5ms window = acceptable latency overhead for 30s horizon tasks
+  max_queue_delay_microseconds: 5000
+
+  # Model instances fill batches independently
+  default_queue_policy {
+    allow_timeout_override: false
+    timeout_action: REJECT
+    default_timeout_microseconds: 50000  # 50ms total queue timeout
+    max_queue_size: 256
+  }
+}
+
+# ----------------------------------------------------------
+# Instance group — 2 GPU instances per server node
+# ----------------------------------------------------------
+instance_group [
+  {
+    name: "world_model_gpu"
+    count: 2
+    kind: KIND_GPU
+    gpus: [ 0, 1 ]
+    # Optional: pin model to specific GPU memory
+    profile: [ "trt_fp16" ]
+  }
+]
+
+# ----------------------------------------------------------
+# Optimization — TensorRT FP16 execution plan
+# ----------------------------------------------------------
+optimization {
+  execution_accelerators {
+    gpu_execution_accelerator: [
+      {
+        name: "tensorrt"
+        parameters {
+          key: "precision_mode"
+          value: "FP16"
+        }
+        parameters {
+          key: "max_workspace_size_bytes"
+          value: "4294967296"  # 4 GiB TRT workspace
+        }
+        parameters {
+          key: "trt_engine_cache_enable"
+          value: "1"
+        }
+        parameters {
+          key: "trt_engine_cache_path"
+          value: "/tmp/trt_cache"
+        }
+        parameters {
+          key: "dla_core"
+          value: "-1"  # Disable DLA, use GPU tensor cores
+        }
+      }
+    ]
+    cpu_execution_accelerator: []
+  }
+  input_pinned_memory { enable: true }
+  output_pinned_memory { enable: true }
+  gather_kernel_buffer_threshold: 6
+}
+
+# ----------------------------------------------------------
+# Sequence batching is NOT used (stateless per-frame inference)
+# ----------------------------------------------------------
+
+# ----------------------------------------------------------
+# Model warmup — pre-allocate GPU memory on startup
+# ----------------------------------------------------------
+model_warmup [
+  {
+    name: "world_model_warmup"
+    batch_size: 4
+    inputs {
+      key: "video_tokens"
+      value {
+        data_type: TYPE_FP16
+        dims: [ 4, 3136, 512 ]
+        zero_data: true
+      }
+    }
+    inputs {
+      key: "agent_states"
+      value {
+        data_type: TYPE_FP32
+        dims: [ 4, 64, 12 ]
+        zero_data: true
+      }
+    }
+    inputs {
+      key: "occupancy_map"
+      value {
+        data_type: TYPE_FP32
+        dims: [ 4, 200, 200, 4 ]
+        zero_data: true
+      }
+    }
+    inputs {
+      key: "attention_mask"
+      value {
+        data_type: TYPE_BOOL
+        dims: [ 4, 3136 ]
+        zero_data: false
+        random_data: true
+      }
+    }
+  }
+]
+
+# ----------------------------------------------------------
+# Model version policy — use latest only
+# ----------------------------------------------------------
+version_policy {
+  latest {
+    num_versions: 2
+  }
+}
+
+# ----------------------------------------------------------
+# Ensemble scheduling — None (standalone model)
+# ----------------------------------------------------------
+
+# ----------------------------------------------------------
+# Parameters
+# ----------------------------------------------------------
+parameters {
+  key: "EXECUTION_ENV_PATH"
+  value { string_value: "/opt/triton/envs/world_model" }
+}
+parameters {
+  key: "MAX_TOKENS"
+  value { string_value: "3136" }
+}
+parameters {
+  key: "EMBED_DIM"
+  value { string_value: "512" }
+}
+parameters {
+  key: "NUM_HEADS"
+  value { string_value: "16" }
+}
+parameters {
+  key: "NUM_LAYERS"
+  value { string_value: "24" }

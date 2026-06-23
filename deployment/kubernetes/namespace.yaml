@@ -1,0 +1,153 @@
+# ============================================================
+# WarehouseGPT Kubernetes Namespace with Resource Quotas
+# ============================================================
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: warehousegpt
+  labels:
+    app.kubernetes.io/name: warehousegpt
+    app.kubernetes.io/part-of: physical-ai-os
+    environment: production
+    team: warehousegpt-engineering
+  annotations:
+    description: "Physical AI Operating System for Warehouses — production namespace"
+
+---
+apiVersion: v1
+kind: ResourceQuota
+metadata:
+  name: warehousegpt-compute-quota
+  namespace: warehousegpt
+spec:
+  hard:
+    # CPU
+    requests.cpu: "64"
+    limits.cpu: "128"
+    # Memory
+    requests.memory: 256Gi
+    limits.memory: 512Gi
+    # GPU (NVIDIA A100/H100)
+    requests.nvidia.com/gpu: "16"
+    limits.nvidia.com/gpu: "16"
+    # Storage
+    requests.storage: 20Ti
+    # Pod count
+    pods: "100"
+    # Services
+    services: "50"
+    services.loadbalancers: "5"
+    services.nodeports: "10"
+    # Persistent Volume Claims
+    persistentvolumeclaims: "30"
+    # Secrets & ConfigMaps
+    secrets: "100"
+    configmaps: "100"
+
+---
+apiVersion: v1
+kind: LimitRange
+metadata:
+  name: warehousegpt-limit-range
+  namespace: warehousegpt
+spec:
+  limits:
+    # Container defaults
+    - type: Container
+      default:
+        cpu: "1"
+        memory: 2Gi
+      defaultRequest:
+        cpu: 250m
+        memory: 512Mi
+      max:
+        cpu: "32"
+        memory: 128Gi
+      min:
+        cpu: 50m
+        memory: 64Mi
+    # Init container limits
+    - type: InitContainer
+      default:
+        cpu: "1"
+        memory: 1Gi
+      defaultRequest:
+        cpu: 100m
+        memory: 256Mi
+      max:
+        cpu: "4"
+        memory: 8Gi
+    # PersistentVolumeClaim limits
+    - type: PersistentVolumeClaim
+      max:
+        storage: 5Ti
+      min:
+        storage: 1Gi
+
+---
+# NetworkPolicy: restrict inter-namespace traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: warehousegpt-default-deny
+  namespace: warehousegpt
+spec:
+  podSelector: {}
+  policyTypes:
+    - Ingress
+    - Egress
+  egress:
+    # Allow DNS resolution
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP
+    # Allow intra-namespace traffic
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: warehousegpt
+
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: warehousegpt-allow-internal
+  namespace: warehousegpt
+spec:
+  podSelector:
+    matchLabels:
+      app.kubernetes.io/part-of: physical-ai-os
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: warehousegpt
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: monitoring
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: ingress-nginx
+  egress:
+    - to:
+        - namespaceSelector:
+            matchLabels:
+              kubernetes.io/metadata.name: warehousegpt
+    # Allow external API calls (Anthropic Claude, AWS S3, etc.)
+    - to:
+        - ipBlock:
+            cidr: 0.0.0.0/0
+            except:
+              - 10.0.0.0/8
+              - 172.16.0.0/12
+              - 192.168.0.0/16
+      ports:
+        - port: 443
+          protocol: TCP
+        - port: 80
+          protocol: TCP

@@ -1,0 +1,124 @@
+# ============================================================
+# Grafana Datasource Provisioning — WarehouseGPT Production
+# ============================================================
+
+apiVersion: 1
+
+deleteDatasources:
+  - name: OldPrometheus
+    orgId: 1
+
+datasources:
+
+  # ---- Prometheus (primary metrics source) ----
+  - name: Prometheus
+    type: prometheus
+    uid: warehousegpt-prometheus
+    access: proxy
+    orgId: 1
+    url: http://prometheus:9090
+    isDefault: true
+    editable: false
+    jsonData:
+      httpMethod: POST
+      prometheusType: Prometheus
+      prometheusVersion: "2.51.0"
+      timeInterval: "10s"
+      queryTimeout: "60s"
+      # Enable Exemplars for trace correlation
+      exemplarTraceIdDestinations:
+        - name: traceID
+          datasourceUid: warehousegpt-tempo
+      # Custom query options
+      customQueryParameters: ""
+      incrementalQuerying: true
+      incrementalQueryOverlapWindow: "10m"
+    secureJsonData: {}
+
+  # ---- TimescaleDB (PostgreSQL + time-series) ----
+  - name: TimescaleDB
+    type: postgres
+    uid: warehousegpt-timescaledb
+    access: proxy
+    orgId: 1
+    url: timescaledb-primary:5432
+    database: warehousegpt
+    user: grafana_ro
+    editable: false
+    jsonData:
+      sslmode: require
+      maxOpenConns: 10
+      maxIdleConns: 5
+      connMaxLifetime: 14400
+      postgresVersion: 1600
+      timescaledb: true
+    secureJsonData:
+      password: "${GRAFANA_TIMESCALEDB_PASSWORD}"
+
+  # ---- Neo4j (graph queries for warehouse topology) ----
+  - name: Neo4j
+    type: hamedkarbasi73-nodegraph-panel
+    uid: warehousegpt-neo4j
+    access: proxy
+    orgId: 1
+    url: http://neo4j-bolt:7474
+    editable: false
+    jsonData:
+      username: neo4j_ro
+    secureJsonData:
+      password: "${GRAFANA_NEO4J_PASSWORD}"
+
+  # ---- Tempo (distributed traces — OpenTelemetry) ----
+  - name: Tempo
+    type: tempo
+    uid: warehousegpt-tempo
+    access: proxy
+    orgId: 1
+    url: http://tempo:3200
+    editable: false
+    jsonData:
+      httpMethod: GET
+      tracesToMetrics:
+        datasourceUid: warehousegpt-prometheus
+        tags:
+          - key: service.name
+            value: service
+          - key: job
+        queries:
+          - name: Request rate
+            query: "sum(rate(http_requests_total{$__tags}[5m]))"
+      serviceMap:
+        datasourceUid: warehousegpt-prometheus
+      nodeGraph:
+        enabled: true
+      lokiSearch:
+        datasourceUid: warehousegpt-loki
+
+  # ---- Loki (structured logs) ----
+  - name: Loki
+    type: loki
+    uid: warehousegpt-loki
+    access: proxy
+    orgId: 1
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      derivedFields:
+        - datasourceUid: warehousegpt-tempo
+          matcherRegex: '"trace_id":"([0-9a-f]+)"'
+          name: TraceID
+          url: "$${__value.raw}"
+          urlDisplayLabel: View Trace
+      maxLines: 1000
+
+  # ---- AlertManager ----
+  - name: Alertmanager
+    type: alertmanager
+    uid: warehousegpt-alertmanager
+    access: proxy
+    orgId: 1
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false

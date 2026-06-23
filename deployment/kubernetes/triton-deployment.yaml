@@ -1,0 +1,315 @@
+# ============================================================
+# Triton Inference Server — Deployment, Service, HPA
+# ============================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: triton-inference-server
+  namespace: warehousegpt
+  labels:
+    app: triton-inference-server
+    app.kubernetes.io/name: triton
+    app.kubernetes.io/component: inference
+    app.kubernetes.io/part-of: physical-ai-os
+    version: "24.12"
+  annotations:
+    deployment.kubernetes.io/revision: "1"
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: triton-inference-server
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  template:
+    metadata:
+      labels:
+        app: triton-inference-server
+        app.kubernetes.io/name: triton
+        app.kubernetes.io/component: inference
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8002"
+        prometheus.io/path: "/metrics"
+    spec:
+      # Require GPU nodes
+      nodeSelector:
+        accelerator: nvidia-a100
+      tolerations:
+        - key: "nvidia.com/gpu"
+          operator: "Exists"
+          effect: "NoSchedule"
+      # Anti-affinity: spread replicas across nodes
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - triton-inference-server
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-triton
+      priorityClassName: gpu-high-priority
+
+      initContainers:
+        - name: model-repo-init
+          image: amazon/aws-cli:2.15.0
+          command:
+            - /bin/sh
+            - -c
+            - |
+              echo "Syncing model repository from S3..."
+              aws s3 sync s3://${MODEL_BUCKET}/triton-models /model-repository \
+                --exclude "*.tmp" --delete
+              echo "Model repository sync complete."
+          env:
+            - name: MODEL_BUCKET
+              valueFrom:
+                configMapKeyRef:
+                  name: warehousegpt-config
+                  key: model_s3_bucket
+            - name: AWS_DEFAULT_REGION
+              valueFrom:
+                configMapKeyRef:
+                  name: warehousegpt-config
+                  key: aws_region
+          volumeMounts:
+            - name: model-repository
+              mountPath: /model-repository
+
+      containers:
+        - name: triton-server
+          image: nvcr.io/nvidia/tritonserver:24.12-py3
+          imagePullPolicy: IfNotPresent
+          command:
+            - tritonserver
+          args:
+            - --model-repository=/model-repository
+            - --http-port=8000
+            - --grpc-port=8001
+            - --metrics-port=8002
+            - --allow-metrics=true
+            - --allow-gpu-metrics=true
+            - --log-verbose=1
+            - --log-info=true
+            - --log-warning=true
+            - --log-error=true
+            - --strict-model-config=false
+            - --model-control-mode=poll
+            - --repository-poll-secs=30
+            - --pinned-memory-pool-byte-size=268435456
+            - --cuda-memory-pool-byte-size=0:4294967296
+            - --min-supported-compute-capability=8.0
+            - --backend-config=python,shm-default-byte-size=134217728
+            - --backend-config=tensorrt,plugins=/usr/lib/x86_64-linux-gnu/libnvinfer_plugin.so.8
+
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+            - name: grpc
+              containerPort: 8001
+              protocol: TCP
+            - name: metrics
+              containerPort: 8002
+              protocol: TCP
+
+          env:
+            - name: NVIDIA_VISIBLE_DEVICES
+              value: "all"
+            - name: NVIDIA_DRIVER_CAPABILITIES
+              value: "compute,utility"
+            - name: LD_PRELOAD
+              value: ""
+            - name: OMP_NUM_THREADS
+              value: "8"
+
+          resources:
+            requests:
+              cpu: "8"
+              memory: 32Gi
+              nvidia.com/gpu: "2"
+            limits:
+              cpu: "16"
+              memory: 64Gi
+              nvidia.com/gpu: "2"
+
+          volumeMounts:
+            - name: model-repository
+              mountPath: /model-repository
+              readOnly: true
+            - name: shared-memory
+              mountPath: /dev/shm
+
+          livenessProbe:
+            httpGet:
+              path: /v2/health/live
+              port: 8000
+            initialDelaySeconds: 60
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 5
+            successThreshold: 1
+
+          readinessProbe:
+            httpGet:
+              path: /v2/health/ready
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 10
+            timeoutSeconds: 10
+            failureThreshold: 10
+            successThreshold: 1
+
+          startupProbe:
+            httpGet:
+              path: /v2/health/live
+              port: 8000
+            initialDelaySeconds: 30
+            periodSeconds: 15
+            timeoutSeconds: 10
+            failureThreshold: 20
+
+          lifecycle:
+            preStop:
+              exec:
+                command: ["/bin/sh", "-c", "sleep 15"]
+
+      volumes:
+        - name: model-repository
+          emptyDir: {}
+        - name: shared-memory
+          emptyDir:
+            medium: Memory
+            sizeLimit: 8Gi
+
+      terminationGracePeriodSeconds: 60
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: triton-inference-server
+  namespace: warehousegpt
+  labels:
+    app: triton-inference-server
+    app.kubernetes.io/component: inference
+  annotations:
+    prometheus.io/scrape: "true"
+    prometheus.io/port: "8002"
+spec:
+  selector:
+    app: triton-inference-server
+  ports:
+    - name: http
+      port: 8000
+      targetPort: 8000
+      protocol: TCP
+    - name: grpc
+      port: 8001
+      targetPort: 8001
+      protocol: TCP
+    - name: metrics
+      port: 8002
+      targetPort: 8002
+      protocol: TCP
+  type: ClusterIP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+# ServiceAccount for Triton
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: warehousegpt-triton
+  namespace: warehousegpt
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::ACCOUNT_ID:role/warehousegpt-triton-role
+
+---
+# HPA based on custom GPU memory utilization metric
+# Requires prometheus-adapter configured with DCGM metrics
+apiVersion: autoscaling/v2
+kind: HorizontalPodAutoscaler
+metadata:
+  name: triton-inference-server-hpa
+  namespace: warehousegpt
+spec:
+  scaleTargetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: triton-inference-server
+  minReplicas: 2
+  maxReplicas: 8
+  metrics:
+    # GPU memory utilization (DCGM metric via prometheus-adapter)
+    - type: Pods
+      pods:
+        metric:
+          name: dcgm_fb_used_percent
+        target:
+          type: AverageValue
+          averageValue: "75"
+    # HTTP request queue depth
+    - type: Pods
+      pods:
+        metric:
+          name: nv_inference_queue_duration_us
+        target:
+          type: AverageValue
+          averageValue: "5000"
+    # CPU utilization as secondary signal
+    - type: Resource
+      resource:
+        name: cpu
+        target:
+          type: Utilization
+          averageUtilization: 70
+  behavior:
+    scaleUp:
+      stabilizationWindowSeconds: 60
+      policies:
+        - type: Pods
+          value: 2
+          periodSeconds: 60
+    scaleDown:
+      stabilizationWindowSeconds: 300
+      policies:
+        - type: Pods
+          value: 1
+          periodSeconds: 120
+
+---
+# PodDisruptionBudget: ensure at least 1 replica always running
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: triton-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 1
+  selector:
+    matchLabels:
+      app: triton-inference-server
+
+---
+# ConfigMap for Triton runtime configuration
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: warehousegpt-config
+  namespace: warehousegpt
+data:
+  model_s3_bucket: "warehousegpt-models-prod"
+  aws_region: "us-east-1"
+  triton_grpc_endpoint: "triton-inference-server:8001"
+  triton_http_endpoint: "triton-inference-server:8000"

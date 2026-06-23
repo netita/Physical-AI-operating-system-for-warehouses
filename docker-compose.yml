@@ -1,0 +1,577 @@
+---
+# =============================================================================
+# WarehouseGPT — Docker Compose Stack
+# =============================================================================
+# Usage:
+#   cp .env.example .env  # fill in secrets
+#   docker compose up -d
+#
+# GPU note: Triton requires the NVIDIA Container Toolkit.
+#   https://docs.nvidia.com/datacenter/cloud-native/container-toolkit/install-guide.html
+#
+# All persistent data lives in named Docker volumes.
+# All services communicate on the internal `warehousegpt` network.
+# Only gateway ports are exposed to the host.
+# =============================================================================
+
+version: "3.9"
+
+# ---------------------------------------------------------------------------
+# Top-level extension anchors
+# ---------------------------------------------------------------------------
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "50m"
+    max-file: "5"
+
+x-restart: &always-restart
+  restart: unless-stopped
+
+x-healthcheck-defaults: &hc-defaults
+  interval: 15s
+  timeout: 10s
+  retries: 5
+  start_period: 30s
+
+# ---------------------------------------------------------------------------
+# Networks
+# ---------------------------------------------------------------------------
+networks:
+  warehousegpt:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.30.0.0/24
+
+# ---------------------------------------------------------------------------
+# Named volumes
+# ---------------------------------------------------------------------------
+volumes:
+  postgres_data:
+  neo4j_data:
+  neo4j_logs:
+  neo4j_import:
+  neo4j_plugins:
+  chromadb_data:
+  redis_data:
+  triton_model_repository:
+  prometheus_data:
+  grafana_data:
+  alertmanager_data:
+  otel_collector_config:
+
+# ---------------------------------------------------------------------------
+# Services
+# ---------------------------------------------------------------------------
+services:
+
+  # =========================================================================
+  # PostgreSQL — WMS records, mission history, audit log
+  # =========================================================================
+  postgres:
+    image: postgres:16.3-alpine
+    container_name: warehousegpt-postgres
+    <<: *always-restart
+    logging: *default-logging
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-warehousegpt}
+      POSTGRES_USER: ${POSTGRES_USER:-warehousegpt}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/postgres/init:/docker-entrypoint-initdb.d:ro
+    ports:
+      - "127.0.0.1:5434:5432"
+    networks:
+      - warehousegpt
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-warehousegpt} -d ${POSTGRES_DB:-warehousegpt}"]
+    shm_size: "256mb"
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=512MB
+        -c effective_cache_size=1536MB
+        -c maintenance_work_mem=128MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c work_mem=8MB
+        -c min_wal_size=1GB
+        -c max_wal_size=4GB
+        -c log_statement=ddl
+        -c log_min_duration_statement=1000
+
+  # =========================================================================
+  # Redis — Task queue, pub/sub, real-time state cache
+  # =========================================================================
+  redis:
+    image: redis:7.4-alpine
+    container_name: warehousegpt-redis
+    <<: *always-restart
+    logging: *default-logging
+    command: >
+      redis-server
+        --requirepass ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+        --maxmemory 2gb
+        --maxmemory-policy allkeys-lru
+        --save 60 1000
+        --save 300 100
+        --save 900 1
+        --appendonly yes
+        --appendfsync everysec
+        --tcp-keepalive 60
+        --loglevel notice
+    volumes:
+      - redis_data:/data
+    ports:
+      - "127.0.0.1:6380:6379"
+    networks:
+      - warehousegpt
+    healthcheck:
+      <<: *hc-defaults
+      test:
+        - "CMD-SHELL"
+        - "redis-cli -a $$REDIS_PASSWORD ping | grep PONG"
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD:?REDIS_PASSWORD must be set}
+
+  # =========================================================================
+  # Neo4j — Warehouse scene graph & spatial knowledge
+  # =========================================================================
+  neo4j:
+    image: neo4j:5.21-community
+    container_name: warehousegpt-neo4j
+    <<: *always-restart
+    logging: *default-logging
+    environment:
+      NEO4J_AUTH: "${NEO4J_USER:-neo4j}/${NEO4J_PASSWORD:?NEO4J_PASSWORD must be set}"
+      NEO4J_PLUGINS: '["apoc", "graph-data-science"]'
+      NEO4J_dbms_security_procedures_unrestricted: "apoc.*,gds.*"
+      NEO4J_dbms_security_procedures_allowlist: "apoc.*,gds.*"
+      NEO4J_server_memory_heap_initial__size: "1G"
+      NEO4J_server_memory_heap_max__size: "4G"
+      NEO4J_server_memory_pagecache_size: "2G"
+      NEO4J_db_transaction_timeout: "60s"
+      NEO4J_dbms_logs_query_enabled: "INFO"
+      NEO4J_dbms_logs_query_threshold: "1000ms"
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - neo4j_import:/var/lib/neo4j/import
+      - neo4j_plugins:/plugins
+    ports:
+      - "127.0.0.1:7474:7474"   # Neo4j Browser (HTTP)
+      - "127.0.0.1:7687:7687"   # Bolt protocol
+    networks:
+      - warehousegpt
+    healthcheck:
+      <<: *hc-defaults
+      test:
+        - "CMD-SHELL"
+        - "wget -qO- http://localhost:7474/ | grep -q 'neo4j_version' || exit 1"
+      start_period: 60s
+
+  # =========================================================================
+  # ChromaDB — Vector store for semantic search and RAG
+  # =========================================================================
+  chromadb:
+    image: chromadb/chroma:0.5.3
+    container_name: warehousegpt-chromadb
+    <<: *always-restart
+    logging: *default-logging
+    environment:
+      IS_PERSISTENT: "TRUE"
+      PERSIST_DIRECTORY: /chroma/chroma
+      ANONYMIZED_TELEMETRY: "FALSE"
+      CHROMA_SERVER_AUTH_CREDENTIALS_PROVIDER: "chromadb.auth.token.TokenConfigServerAuthCredentialsProvider"
+      CHROMA_SERVER_AUTH_PROVIDER: "chromadb.auth.token.TokenAuthServerProvider"
+      CHROMA_SERVER_AUTH_CREDENTIALS: ${CHROMA_SERVER_AUTH_TOKEN:-change_me_chroma_token}
+      CHROMA_SERVER_AUTH_TOKEN_TRANSPORT_HEADER: "Authorization"
+    volumes:
+      - chromadb_data:/chroma/chroma
+    ports:
+      - "127.0.0.1:8001:8000"
+    networks:
+      - warehousegpt
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/heartbeat || exit 1"]
+
+  # =========================================================================
+  # NVIDIA Triton Inference Server — TensorRT / ONNX model serving
+  # =========================================================================
+  triton-server:
+    image: nvcr.io/nvidia/tritonserver:24.06-py3
+    container_name: warehousegpt-triton
+    <<: *always-restart
+    logging: *default-logging
+    runtime: nvidia
+    environment:
+      NVIDIA_VISIBLE_DEVICES: ${CUDA_VISIBLE_DEVICES:-0}
+      NVIDIA_DRIVER_CAPABILITIES: compute,utility,video
+    volumes:
+      - triton_model_repository:/models
+      # Optional: bind-mount local model repo during development
+      # - ./models:/models:ro
+    ports:
+      - "127.0.0.1:8000:8000"   # HTTP REST API
+      - "127.0.0.1:8002:8001"   # gRPC API
+      - "127.0.0.1:8003:8002"   # Prometheus metrics
+    networks:
+      - warehousegpt
+    command: >
+      tritonserver
+        --model-repository=/models
+        --strict-model-config=false
+        --log-verbose=0
+        --log-info=true
+        --log-warning=true
+        --log-error=true
+        --grpc-use-ssl=false
+        --http-thread-count=8
+        --grpc-infer-allocation-pool-size=16
+        --allow-metrics=true
+        --metrics-port=8002
+        --allow-gpu-metrics=true
+        --backend-config=tensorrt,coalesce_request_input=true
+    healthcheck:
+      <<: *hc-defaults
+      test:
+        - "CMD-SHELL"
+        - "curl -sf http://localhost:8000/v2/health/ready || exit 1"
+      start_period: 90s
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              capabilities: [gpu]
+
+  # =========================================================================
+  # Alertmanager — Alert routing and email/Slack notifications
+  # =========================================================================
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: warehousegpt-alertmanager
+    <<: *always-restart
+    logging: *default-logging
+    environment:
+      ALERT_GMAIL_FROM: ${ALERT_GMAIL_FROM:?ALERT_GMAIL_FROM must be set in .env}
+      ALERT_GMAIL_APP_PASSWORD: ${ALERT_GMAIL_APP_PASSWORD:?ALERT_GMAIL_APP_PASSWORD must be set in .env}
+      ALERT_EMAIL_TO: ${ALERT_EMAIL_TO:-your-email@example.com}
+    entrypoint: ["/etc/alertmanager/entrypoint.sh"]
+    volumes:
+      - ./infra/monitoring/alertmanager.yml.tmpl:/etc/alertmanager/alertmanager.yml.tmpl:ro
+      - ./infra/monitoring/alertmanager-entrypoint.sh:/etc/alertmanager/entrypoint.sh:ro
+      - alertmanager_data:/alertmanager
+    ports:
+      - "127.0.0.1:9093:9093"
+    networks:
+      - warehousegpt
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9093/-/healthy || exit 1"]
+
+  # =========================================================================
+  # Prometheus — Metrics collection
+  # =========================================================================
+  prometheus:
+    image: prom/prometheus:v2.53.0
+    container_name: warehousegpt-prometheus
+    <<: *always-restart
+    logging: *default-logging
+    user: "nobody"
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=30d"
+      - "--storage.tsdb.retention.size=20GB"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+      - "--web.console.libraries=/usr/share/prometheus/console_libraries"
+      - "--web.console.templates=/usr/share/prometheus/consoles"
+    volumes:
+      - prometheus_data:/prometheus
+      - ./infra/monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infra/monitoring/rules:/etc/prometheus/rules:ro
+    ports:
+      - "127.0.0.1:9090:9090"
+    networks:
+      - warehousegpt
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "wget -qO- http://localhost:9090/-/healthy || exit 1"]
+
+  # =========================================================================
+  # Grafana — Observability dashboards and alerting
+  # =========================================================================
+  grafana:
+    image: grafana/grafana:11.1.0
+    container_name: warehousegpt-grafana
+    <<: *always-restart
+    logging: *default-logging
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_ADMIN_PASSWORD:?GRAFANA_ADMIN_PASSWORD must be set}
+      GF_SECURITY_DISABLE_GRAVATAR: "true"
+      GF_SECURITY_COOKIE_SECURE: "false"           # set true behind TLS proxy
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_USERS_ALLOW_ORG_CREATE: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_SERVER_ROOT_URL: "http://localhost:3001"
+      GF_INSTALL_PLUGINS: "grafana-clock-panel,grafana-piechart-panel,grafana-worldmap-panel"
+      # Provisioning: datasources and dashboards are auto-loaded from /etc/grafana/provisioning
+      GF_PATHS_PROVISIONING: /etc/grafana/provisioning
+      # SMTP (optional)
+      GF_SMTP_ENABLED: ${GRAFANA_SMTP_ENABLED:-false}
+      GF_SMTP_HOST: ${GRAFANA_SMTP_HOST:-}
+      GF_SMTP_PORT: ${GRAFANA_SMTP_PORT:-587}
+      GF_SMTP_USER: ${GRAFANA_SMTP_USER:-}
+      GF_SMTP_PASSWORD: ${GRAFANA_SMTP_PASSWORD:-}
+      GF_SMTP_FROM_ADDRESS: ${GRAFANA_SMTP_FROM:-grafana@warehouse.internal}
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "0.0.0.0:3001:3000"   # exposed to LAN — operators access dashboards (3000 taken by discordia)
+    networks:
+      - warehousegpt
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:3000/api/health || exit 1"]
+
+  # =========================================================================
+  # OpenTelemetry Collector — Trace & metric aggregation
+  # =========================================================================
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.104.0
+    container_name: warehousegpt-otel-collector
+    <<: *always-restart
+    logging: *default-logging
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/monitoring/otel-collector.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "127.0.0.1:4317:4317"   # gRPC OTLP receiver
+      - "127.0.0.1:4318:4318"   # HTTP OTLP receiver
+      - "127.0.0.1:8888:8888"   # Collector self-metrics (Prometheus)
+    networks:
+      - warehousegpt
+    depends_on:
+      prometheus:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "wget -qO- http://localhost:13133/health/status || exit 1"]
+
+  # =========================================================================
+  # WarehouseGPT API Gateway (FastAPI)
+  # =========================================================================
+  api-gateway:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: warehousegpt/api-gateway:latest
+    container_name: warehousegpt-api
+    <<: *always-restart
+    logging: *default-logging
+    env_file:
+      - .env
+    environment:
+      # Override service hostnames to use Docker Compose service names
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      NEO4J_URI: bolt://neo4j:7687
+      CHROMA_HOST: chromadb
+      TRITON_GRPC_URL: triton-server:8001
+      TRITON_HTTP_URL: http://triton-server:8000
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    ports:
+      - "0.0.0.0:8000:8000"
+    networks:
+      - warehousegpt
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: "4G"
+
+  # =========================================================================
+  # WarehouseGPT Agent (Claude Sonnet 4.6 + LangChain)
+  # =========================================================================
+  agent:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.agent
+    image: warehousegpt/agent:latest
+    container_name: warehousegpt-agent
+    <<: *always-restart
+    logging: *default-logging
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      CHROMA_HOST: chromadb
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    networks:
+      - warehousegpt
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+      chromadb:
+        condition: service_healthy
+      api-gateway:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: "2G"
+
+  # =========================================================================
+  # Celery Worker — Background task processing
+  # =========================================================================
+  celery-worker:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: warehousegpt/api-gateway:latest
+    container_name: warehousegpt-celery-worker
+    <<: *always-restart
+    logging: *default-logging
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      REDIS_URL: redis://:${REDIS_PASSWORD}@redis:6379/0
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      NEO4J_URI: bolt://neo4j:7687
+      CHROMA_HOST: chromadb
+      TRITON_GRPC_URL: triton-server:8001
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    command: >
+      celery -A warehousegpt.apps.api_gateway.tasks worker
+        --loglevel=info
+        --concurrency=${CELERY_WORKER_CONCURRENCY:-8}
+        --queues=default,perception,fleet,high_priority
+        --without-gossip
+        --without-mingle
+        --without-heartbeat
+    networks:
+      - warehousegpt
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test:
+        - "CMD-SHELL"
+        - "celery -A warehousegpt.apps.api_gateway.tasks inspect ping -d celery@$$HOSTNAME || exit 1"
+      start_period: 45s
+    deploy:
+      resources:
+        limits:
+          cpus: "4.0"
+          memory: "4G"
+
+  # =========================================================================
+  # Celery Beat — Periodic task scheduler
+  # =========================================================================
+  celery-beat:
+    build:
+      context: .
+      dockerfile: docker/Dockerfile.api
+    image: warehousegpt/api-gateway:latest
+    container_name: warehousegpt-celery-beat
+    <<: *always-restart
+    logging: *default-logging
+    env_file:
+      - .env
+    environment:
+      POSTGRES_HOST: postgres
+      REDIS_HOST: redis
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      CELERY_RESULT_BACKEND: redis://:${REDIS_PASSWORD}@redis:6379/1
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB}
+    command: >
+      celery -A warehousegpt.apps.api_gateway.tasks beat
+        --loglevel=info
+        --scheduler=celery.beat:PersistentScheduler
+        --pidfile=/tmp/celerybeat.pid
+    volumes:
+      - ./celerybeat-schedule:/app/celerybeat-schedule
+    networks:
+      - warehousegpt
+    depends_on:
+      redis:
+        condition: service_healthy
+      celery-worker:
+        condition: service_healthy
+    deploy:
+      resources:
+        limits:
+          cpus: "0.5"
+          memory: "512M"
+
+  # =========================================================================
+  # Flower — Celery monitoring UI
+  # =========================================================================
+  flower:
+    image: mher/flower:2.0.1
+    container_name: warehousegpt-flower
+    <<: *always-restart
+    logging: *default-logging
+    environment:
+      CELERY_BROKER_URL: redis://:${REDIS_PASSWORD}@redis:6379/1
+      FLOWER_PORT: 5555
+      FLOWER_BASIC_AUTH: ${FLOWER_BASIC_AUTH:-admin:change_me_flower_password}
+    ports:
+      - "127.0.0.1:5555:5555"
+    networks:
+      - warehousegpt
+    depends_on:
+      redis:
+        condition: service_healthy
+    healthcheck:
+      <<: *hc-defaults
+      test: ["CMD-SHELL", "curl -sf http://localhost:5555/metrics || exit 1"]

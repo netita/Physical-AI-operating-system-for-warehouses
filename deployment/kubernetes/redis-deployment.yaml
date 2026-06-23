@@ -1,0 +1,319 @@
+# ============================================================
+# Redis — State Store, Task Queue, Pub/Sub
+# ============================================================
+apiVersion: apps/v1
+kind: StatefulSet
+metadata:
+  name: redis
+  namespace: warehousegpt
+  labels:
+    app: redis
+    app.kubernetes.io/name: redis
+    app.kubernetes.io/component: cache
+    app.kubernetes.io/part-of: physical-ai-os
+  annotations:
+    description: "Redis 7 with sentinel HA — state store, Celery broker, pub/sub for real-time events"
+spec:
+  serviceName: redis
+  replicas: 3
+  selector:
+    matchLabels:
+      app: redis
+  updateStrategy:
+    type: RollingUpdate
+  template:
+    metadata:
+      labels:
+        app: redis
+        app.kubernetes.io/name: redis
+        app.kubernetes.io/component: cache
+        app.kubernetes.io/part-of: physical-ai-os
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9121"
+        prometheus.io/path: "/metrics"
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - labelSelector:
+                matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                      - redis
+              topologyKey: kubernetes.io/hostname
+      serviceAccountName: warehousegpt-workload
+      securityContext:
+        runAsUser: 999
+        runAsGroup: 999
+        fsGroup: 999
+
+      initContainers:
+        - name: init-redis-config
+          image: redis:7.2-alpine
+          command:
+            - /bin/sh
+            - -c
+            - |
+              # Determine if primary or replica based on pod ordinal
+              ORDINAL=$(hostname | awk -F'-' '{print $NF}')
+              if [ "$ORDINAL" = "0" ]; then
+                echo "Configuring as primary"
+                cp /tmp/redis-primary.conf /etc/redis/redis.conf
+              else
+                echo "Configuring as replica of redis-0"
+                cp /tmp/redis-replica.conf /etc/redis/redis.conf
+              fi
+          volumeMounts:
+            - name: redis-config-template
+              mountPath: /tmp
+            - name: redis-config
+              mountPath: /etc/redis
+
+      containers:
+        - name: redis
+          image: redis:7.2-alpine
+          imagePullPolicy: IfNotPresent
+          command: ["redis-server", "/etc/redis/redis.conf"]
+
+          ports:
+            - name: redis
+              containerPort: 6379
+              protocol: TCP
+
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: redis_password
+
+          resources:
+            requests:
+              cpu: "1"
+              memory: 4Gi
+            limits:
+              cpu: "2"
+              memory: 8Gi
+
+          volumeMounts:
+            - name: data
+              mountPath: /data
+            - name: redis-config
+              mountPath: /etc/redis
+
+          livenessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 20
+            periodSeconds: 15
+            timeoutSeconds: 5
+            failureThreshold: 3
+
+          readinessProbe:
+            exec:
+              command:
+                - redis-cli
+                - -a
+                - $(REDIS_PASSWORD)
+                - ping
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 5
+
+        # Redis Sentinel
+        - name: sentinel
+          image: redis:7.2-alpine
+          command:
+            - redis-sentinel
+            - /etc/sentinel/sentinel.conf
+          ports:
+            - name: sentinel
+              containerPort: 26379
+          env:
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: redis_password
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 200m
+              memory: 256Mi
+          volumeMounts:
+            - name: sentinel-config
+              mountPath: /etc/sentinel
+
+        # Redis exporter for Prometheus
+        - name: redis-exporter
+          image: oliver006/redis_exporter:v1.61.0
+          ports:
+            - name: exporter
+              containerPort: 9121
+          env:
+            - name: REDIS_ADDR
+              value: "redis://localhost:6379"
+            - name: REDIS_PASSWORD
+              valueFrom:
+                secretKeyRef:
+                  name: warehousegpt-secrets
+                  key: redis_password
+          resources:
+            requests:
+              cpu: 50m
+              memory: 64Mi
+            limits:
+              cpu: 100m
+              memory: 128Mi
+
+      volumes:
+        - name: redis-config-template
+          configMap:
+            name: redis-config-template
+        - name: redis-config
+          emptyDir: {}
+        - name: sentinel-config
+          configMap:
+            name: redis-sentinel-config
+
+  volumeClaimTemplates:
+    - metadata:
+        name: data
+        labels:
+          app: redis
+      spec:
+        accessModes:
+          - ReadWriteOnce
+        storageClassName: gp3-encrypted
+        resources:
+          requests:
+            storage: 100Gi
+
+---
+# Headless service
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis
+  namespace: warehousegpt
+  labels:
+    app: redis
+    app.kubernetes.io/component: cache
+spec:
+  selector:
+    app: redis
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+    - name: sentinel
+      port: 26379
+      targetPort: 26379
+  clusterIP: None
+
+---
+# Client-facing service (routes to primary via label)
+apiVersion: v1
+kind: Service
+metadata:
+  name: redis-primary
+  namespace: warehousegpt
+  labels:
+    app: redis
+    role: primary
+spec:
+  selector:
+    app: redis
+    role: primary
+  ports:
+    - name: redis
+      port: 6379
+      targetPort: 6379
+  type: ClusterIP
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-config-template
+  namespace: warehousegpt
+data:
+  redis-primary.conf: |
+    port 6379
+    requirepass ${REDIS_PASSWORD}
+    masterauth ${REDIS_PASSWORD}
+    maxmemory 6gb
+    maxmemory-policy allkeys-lru
+    save 900 1
+    save 300 10
+    save 60 10000
+    appendonly yes
+    appendfsync everysec
+    no-appendfsync-on-rewrite no
+    auto-aof-rewrite-percentage 100
+    auto-aof-rewrite-min-size 64mb
+    tcp-keepalive 300
+    timeout 0
+    tcp-backlog 511
+    hz 20
+    loglevel notice
+    databases 16
+    bind 0.0.0.0
+    protected-mode yes
+    # Lua scripting timeout
+    lua-time-limit 5000
+    # Pub/Sub buffer
+    client-output-buffer-limit pubsub 256mb 64mb 60
+
+  redis-replica.conf: |
+    port 6379
+    requirepass ${REDIS_PASSWORD}
+    masterauth ${REDIS_PASSWORD}
+    replicaof redis-0.redis.warehousegpt.svc.cluster.local 6379
+    replica-serve-stale-data yes
+    replica-read-only yes
+    maxmemory 6gb
+    maxmemory-policy allkeys-lru
+    appendonly yes
+    appendfsync everysec
+    tcp-keepalive 300
+    loglevel notice
+    bind 0.0.0.0
+    protected-mode yes
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: redis-sentinel-config
+  namespace: warehousegpt
+data:
+  sentinel.conf: |
+    port 26379
+    sentinel monitor warehousegpt-master redis-0.redis.warehousegpt.svc.cluster.local 6379 2
+    sentinel auth-pass warehousegpt-master ${REDIS_PASSWORD}
+    sentinel down-after-milliseconds warehousegpt-master 5000
+    sentinel failover-timeout warehousegpt-master 60000
+    sentinel parallel-syncs warehousegpt-master 1
+    loglevel notice
+
+---
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: redis-pdb
+  namespace: warehousegpt
+spec:
+  minAvailable: 2
+  selector:
+    matchLabels:
+      app: redis

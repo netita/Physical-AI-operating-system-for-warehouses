@@ -1,0 +1,105 @@
+# ============================================================
+# WarehouseGPT Digital Twin Service Image
+# Real-time warehouse state synchronisation
+# WebSocket streaming + gRPC twin queries
+# ============================================================
+# Build (from repo root):
+#   docker build \
+#     -f deployment/docker/Dockerfile.digital-twin \
+#     -t warehousegpt/digital-twin:latest \
+#     --build-arg BUILD_DATE=$(date -u +%Y-%m-%dT%H:%M:%SZ) \
+#     --build-arg GIT_SHA=$(git rev-parse --short HEAD) \
+#     .
+# ============================================================
+
+ARG BASE_IMAGE=warehousegpt/base:24.12
+FROM ${BASE_IMAGE}
+
+ARG BUILD_DATE
+ARG GIT_SHA
+ARG VERSION=1.0.0
+
+LABEL org.opencontainers.image.title="WarehouseGPT Digital Twin" \
+      org.opencontainers.image.description="Real-time digital twin synchronisation service with WebSocket and gRPC interfaces" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.created="${BUILD_DATE}" \
+      org.opencontainers.image.revision="${GIT_SHA}" \
+      org.opencontainers.image.vendor="WarehouseGPT" \
+      org.opencontainers.image.licenses="Proprietary"
+
+USER root
+
+# ---- Additional deps specific to digital twin ----
+RUN pip install --no-cache-dir \
+    # gRPC
+    grpcio==1.64.1 \
+    grpcio-tools==1.64.1 \
+    grpcio-reflection==1.64.1 \
+    grpcio-health-checking==1.64.1 \
+    # Async WebSocket server
+    websockets==12.0 \
+    # Async database drivers (high-throughput time-series writes)
+    asyncpg==0.29.0 \
+    # Spatial computation
+    shapely==2.0.5 \
+    pyproj==3.6.1 \
+    scipy==1.13.1 \
+    rtree==1.3.0 \
+    # Message serialization (compact binary for twin state)
+    flatbuffers==24.3.25 \
+    # 3D math
+    transforms3d==0.4.2 \
+    # ZMQ for ROS2 / edge device bridge
+    pyzmq==26.0.3
+
+# ---- Generate gRPC stubs ----
+COPY proto/ /app/proto/ 2>/dev/null || true
+RUN if [ -d /app/proto ]; then \
+      python -m grpc_tools.protoc \
+        -I /app/proto \
+        --python_out=/app/warehousegpt/digital_twin/grpc \
+        --grpc_python_out=/app/warehousegpt/digital_twin/grpc \
+        /app/proto/digital_twin.proto 2>/dev/null || true; \
+    fi
+
+# ---- Install application ----
+COPY pyproject.toml /app/pyproject.toml
+COPY warehousegpt/ /app/warehousegpt/
+RUN pip install --no-cache-dir -e /app
+
+# ---- Copy runtime configuration ----
+COPY deployment/docker/config/digital-twin/ /app/config/ 2>/dev/null || true
+
+# ---- Healthcheck ----
+COPY deployment/docker/scripts/healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/healthcheck.sh
+
+USER warehousegpt
+
+# ---- Runtime environment defaults ----
+ENV HTTP_PORT=8081 \
+    WS_PORT=8082 \
+    GRPC_PORT=50052 \
+    METRICS_PORT=9091 \
+    LOG_LEVEL=INFO \
+    ENVIRONMENT=production \
+    SYNC_INTERVAL_MS=100 \
+    MAX_LAG_MS=500 \
+    SPATIAL_RESOLUTION_M=0.1 \
+    MAX_WEBSOCKET_CONNECTIONS=1000 \
+    TWIN_STATE_TTL_SECONDS=300 \
+    ENABLE_OTEL=true \
+    OTEL_SERVICE_NAME=digital-twin \
+    PYTHONPATH=/app
+
+EXPOSE 8081 8082 50052 9091
+
+HEALTHCHECK --interval=20s --timeout=5s --start-period=30s --retries=3 \
+    CMD /usr/local/bin/healthcheck.sh http://localhost:${HTTP_PORT}/health/live
+
+# ---- Default command — launch combined HTTP + WebSocket + gRPC ----
+CMD ["python", "-m", "warehousegpt.digital_twin.server", \
+     "--http-port", "8081", \
+     "--ws-port", "8082", \
+     "--grpc-port", "50052", \
+     "--metrics-port", "9091"]
